@@ -1695,6 +1695,7 @@ function World:_collectBlockingOffAreaProtectedEndpoints(options)
           x = x,
           y = y,
           description = entity.humanoid_class or class.type(entity) or "Humanoid",
+          humanoid = true,
           action = action and action.name,
         }
       end
@@ -1823,7 +1824,7 @@ function World:_captureBlockingOffAreaProtectedBaseline(ingress_tiles, options)
   for _, endpoint in ipairs(endpoints) do
     endpoint.was_valid = self:isTileConnectedToBlockingOffAreaIngress(
       endpoint.x, endpoint.y, ingress_tiles)
-    if endpoint.action then
+    if endpoint.humanoid then
       endpoint.was_valid = self:isHumanoidConnectedToBlockingOffAreaIngress(
         endpoint.x, endpoint.y, ingress_tiles)
     end

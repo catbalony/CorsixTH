@@ -42,6 +42,7 @@ _G._A = saved_A
 
 local World = _G["World"]
 local EntityMap = _G["EntityMap"]
+local Humanoid = _G["Humanoid"]
 
 describe("world.lua: ", function()
   local function makeWorld(entities)
@@ -959,6 +960,35 @@ describe("world.lua: ", function()
       assert.are.equal(1, #blocked)
       assert.are.equal(2, blocked[1].x)
       assert.are.equal(1, blocked[1].y)
+    end)
+
+    it("uses the pre-use walking tile for a humanoid using an object", function()
+      local humanoid = {
+        tile_x = 79,
+        tile_y = 101,
+        humanoid_class = "Nurse",
+        action_queue = {{
+          name = "use_object",
+          old_tile_x = 80,
+          old_tile_y = 100,
+        }},
+      }
+      setmetatable(humanoid, {__index = Humanoid})
+      function humanoid:getCurrentAction()
+        return self.action_queue[1]
+      end
+
+      local world = makeWorld({humanoid})
+      world.rooms = {}
+      local endpoints = world:_collectBlockingOffAreaProtectedEndpoints({
+        check_humanoids = true,
+      })
+
+      assert.are.equal(1, #endpoints)
+      assert.are.equal(80, endpoints[1].x)
+      assert.are.equal(100, endpoints[1].y)
+      assert.is_true(endpoints[1].humanoid)
+      assert.are.equal("use_object", endpoints[1].action)
     end)
 
     it("logs and ignores a pre-existing invalid endpoint inside an affected area", function()
