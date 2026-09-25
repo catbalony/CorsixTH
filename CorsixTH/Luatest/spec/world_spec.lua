@@ -844,7 +844,7 @@ describe("world.lua: ", function()
       world._getBlockingOffAreaImpact = function()
         return false, {}
       end
-      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, callback, before)
+      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, _, callback, before)
         local baseline = before and before()
         return callback(baseline)
       end
@@ -877,7 +877,7 @@ describe("world.lua: ", function()
       world._getBlockingOffAreaImpact = function()
         return false, {{x = 2, y = 1}}
       end
-      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, callback, before)
+      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, _, callback, before)
         local baseline = before and before()
         return callback(baseline)
       end

@@ -2100,6 +2100,7 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation, 
     end)
 
   if first_pass.unsafe then return true, has_normal_spawns end
+  if #ingress_tiles == 0 then return nil, has_normal_spawns end
   if not first_pass.blocked_areas then return false, has_normal_spawns end
 
   -- Only an actually-created blocked component justifies the more expensive
