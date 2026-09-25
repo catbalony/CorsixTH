@@ -42,7 +42,6 @@ _G._A = saved_A
 
 local World = _G["World"]
 local EntityMap = _G["EntityMap"]
-local Humanoid = _G["Humanoid"]
 
 describe("world.lua: ", function()
   local function makeWorld(entities)
@@ -831,41 +830,26 @@ describe("world.lua: ", function()
       assert.is_true(flags["3:1"].passable)
     end)
 
-    it("ignores and logs a humanoid already disconnected before placement", function()
-      local map, flags = makeFlagMap({
-        ["1:1"] = {passable = true},
-        ["2:2"] = {passable = false},
-        ["3:1"] = {passable = true},
-      })
-      local humanoid = {
-        tile_x = 2,
-        tile_y = 2,
-        humanoid_class = "Nurse",
-        action_queue = {{name = "use_object"}},
-      }
-      setmetatable(humanoid, {__index = Humanoid})
-      function humanoid:getCurrentAction()
-        return self.action_queue[1]
-      end
-
-      local world = makeWorld({humanoid})
-      world.map = {th = map}
+    it("does not scan protected endpoints when placement has no topology impact", function()
+      local world = makeWorld({})
       world.spawn_points = {{x = 1, y = 1}}
-      world.rooms = {}
-      world.objects = {}
-      world.isOnMap = function(_, x, y)
-        return 1 <= x and x <= 3 and 1 <= y and y <= 2
-      end
       world.getLocalPlayerHospital = function() return nil end
-      world.pathfinder = {
-        findDistance = function(_, x1, y1, x2, y2)
-          if x1 == 1 and y1 == 1 and x2 == 1 and y2 == 1 then return 0 end
-          return nil
-        end,
-      }
-      local logs = {}
-      world.gameLog = function(_, message)
-        logs[#logs + 1] = message
+      world._getCorridorCandidateBoundaryTiles = function()
+        return {{x = 2, y = 1}}
+      end
+      world._getCorridorCandidateProtectedTiles = function() return {} end
+      world._captureBlockingOffAreaImpactBaseline = function()
+        return {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
+      end
+      world._getBlockingOffAreaImpact = function()
+        return false, {}
+      end
+      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, callback, before)
+        local baseline = before and before()
+        return callback(baseline)
+      end
+      world._captureBlockingOffAreaProtectedBaseline = function()
+        error("protected endpoints must not be scanned")
       end
 
       local object_type = {
@@ -873,57 +857,39 @@ describe("world.lua: ", function()
         class = "Object",
         orientations = {north = {footprint = {{0, 0}}}},
       }
-
       local unsafe = world:wouldCorridorObjectBlockProtectedArea(
         3, 1, object_type, "north", {check_existing = true})
 
       assert.is_false(unsafe)
-      assert.is_true(flags["3:1"].passable)
-      assert.are.equal(1, #logs)
-      assert.is_truthy(logs[1]:find("Nurse", 1, true))
-      assert.is_truthy(logs[1]:find("(2, 2)", 1, true))
-      assert.is_truthy(logs[1]:find("use_object", 1, true))
     end)
 
-    it("still rejects a candidate that disconnects a previously valid humanoid", function()
-      local map, flags = makeFlagMap({
-        ["1:1"] = {passable = true},
-        ["2:2"] = {passable = true},
-        ["3:1"] = {passable = true},
-      })
-      local humanoid = {
-        tile_x = 2,
-        tile_y = 2,
-        humanoid_class = "Nurse",
-        action_queue = {{name = "idle"}},
-      }
-      setmetatable(humanoid, {__index = Humanoid})
-      function humanoid:getCurrentAction()
-        return self.action_queue[1]
-      end
-
-      local world = makeWorld({humanoid})
-      world.map = {th = map}
+    it("defers protected endpoint scan until a new blocked area exists", function()
+      local world = makeWorld({})
       world.spawn_points = {{x = 1, y = 1}}
-      world.rooms = {}
-      world.objects = {}
-      world.isOnMap = function(_, x, y)
-        return 1 <= x and x <= 3 and 1 <= y and y <= 2
-      end
       world.getLocalPlayerHospital = function() return nil end
-      world.pathfinder = {
-        findDistance = function(_, x1, y1, x2, y2)
-          if x1 == 1 and y1 == 1 and x2 == 1 and y2 == 1 then return 0 end
-          if x1 == 2 and y1 == 2 and x2 == 1 and y2 == 1 and
-              flags["3:1"].passable then
-            return 1
-          end
-          return nil
-        end,
-      }
-      local logs = {}
-      world.gameLog = function(_, message)
-        logs[#logs + 1] = message
+      world._getCorridorCandidateBoundaryTiles = function()
+        return {{x = 2, y = 1}}
+      end
+      world._getCorridorCandidateProtectedTiles = function() return {} end
+      world._captureBlockingOffAreaImpactBaseline = function()
+        return {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
+      end
+      world._getBlockingOffAreaImpact = function()
+        return false, {{x = 2, y = 1}}
+      end
+      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, callback, before)
+        local baseline = before and before()
+        return callback(baseline)
+      end
+      local protected_calls = 0
+      world._captureBlockingOffAreaProtectedBaseline = function()
+        protected_calls = protected_calls + 1
+        return {{x = 2, y = 1, was_valid = true, description = "room door"}}
+      end
+      world._blockingOffAreasContainProtectedEndpoint = function(_, areas, endpoints)
+        assert.are.equal(1, #areas)
+        assert.are.equal(1, #endpoints)
+        return true
       end
 
       local object_type = {
@@ -931,13 +897,93 @@ describe("world.lua: ", function()
         class = "Object",
         orientations = {north = {footprint = {{0, 0}}}},
       }
-
       local unsafe = world:wouldCorridorObjectBlockProtectedArea(
         3, 1, object_type, "north", {check_existing = true})
 
       assert.is_true(unsafe)
-      assert.is_true(flags["3:1"].passable)
-      assert.are.equal(0, #logs)
+      assert.are.equal(1, protected_calls)
+    end)
+
+    it("ignores a pre-existing blocked boundary component", function()
+      local map = makeFlagMap({
+        ["1:1"] = {passable = true},
+        ["2:1"] = {passable = true},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 2 and y == 1
+      end
+      world.pathfinder = {
+        findDistance = function(_, x1, y1, x2, y2)
+          if x1 == x2 and y1 == y2 then return 0 end
+          return nil
+        end,
+      }
+      local ingress = {{x = 1, y = 1}}
+      local baseline = world:_captureBlockingOffAreaImpactBaseline(
+        ingress, {{x = 2, y = 1}})
+      local ingress_broken, blocked = world:_getBlockingOffAreaImpact(
+        ingress, baseline)
+
+      assert.is_false(ingress_broken)
+      assert.are.equal(0, #blocked)
+    end)
+
+    it("detects a newly-created blocked boundary component", function()
+      local map = makeFlagMap({
+        ["1:1"] = {passable = true},
+        ["2:1"] = {passable = true},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 2 and y == 1
+      end
+      local connected = true
+      world.pathfinder = {
+        findDistance = function(_, x1, y1, x2, y2)
+          if x1 == x2 and y1 == y2 then return 0 end
+          if connected then return 1 end
+          return nil
+        end,
+      }
+      local ingress = {{x = 1, y = 1}}
+      local baseline = world:_captureBlockingOffAreaImpactBaseline(
+        ingress, {{x = 2, y = 1}})
+      connected = false
+      local ingress_broken, blocked = world:_getBlockingOffAreaImpact(
+        ingress, baseline)
+
+      assert.is_false(ingress_broken)
+      assert.are.equal(1, #blocked)
+      assert.are.equal(2, blocked[1].x)
+      assert.are.equal(1, blocked[1].y)
+    end)
+
+    it("logs and ignores a pre-existing invalid endpoint inside an affected area", function()
+      local world = makeWorld({})
+      world.pathfinder = {
+        findDistance = function() return 1 end,
+      }
+      local logs = {}
+      world.gameLog = function(_, message)
+        logs[#logs + 1] = message
+      end
+
+      local unsafe = world:_blockingOffAreasContainProtectedEndpoint(
+        {{x = 2, y = 1}}, {{
+          x = 2,
+          y = 1,
+          description = "Nurse",
+          action = "use_object",
+          was_valid = false,
+        }})
+
+      assert.is_false(unsafe)
+      assert.are.equal(1, #logs)
+      assert.is_truthy(logs[1]:find("Nurse", 1, true))
+      assert.is_truthy(logs[1]:find("use_object", 1, true))
     end)
 
     it("rolls back zero-spawn move topology when the fallback errors", function()

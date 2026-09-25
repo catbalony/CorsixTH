@@ -1033,37 +1033,72 @@ function UIEditRoom:_getBlueprintDoorOutsideTile()
   return x, y
 end
 
--- Check prospective room walls against protected corridor endpoints. Maps with
--- no normal spawn points retain the legacy strict room rule; a heliport, when
--- present, is protected in addition to that fallback.
+-- Return corridor tiles bordering the prospective room. These are sufficient
+-- to detect whether closing the room perimeter newly splits the surrounding
+-- corridor into separate components.
+function UIEditRoom:_getProspectiveRoomBoundaryTiles()
+  local rect = self.blueprint_rect
+  local tiles = {}
+  for x = rect.x, rect.x + rect.w - 1 do
+    tiles[#tiles + 1] = {x = x, y = rect.y - 1}
+    tiles[#tiles + 1] = {x = x, y = rect.y + rect.h}
+  end
+  for y = rect.y, rect.y + rect.h - 1 do
+    tiles[#tiles + 1] = {x = rect.x - 1, y = y}
+    tiles[#tiles + 1] = {x = rect.x + rect.w, y = y}
+  end
+  return tiles
+end
+
+-- Check prospective room walls. Candidate door connectivity is always checked,
+-- while existing doors, Reception Desks and humanoids are inspected only when
+-- the room actually creates a new blocked corridor component.
 function UIEditRoom:_isProspectiveRoomNetworkValid(options)
   options = options or {}
   local world = self.ui.app.world
   local ingress_tiles, has_normal_spawns = world:getBlockingOffAreaIngressTiles()
-  local extra_tiles = {}
+  local door_tile
 
   if options.include_door then
     local x, y = self:_getBlueprintDoorOutsideTile()
     if not x then return false end
-    extra_tiles[1] = {x = x, y = y}
-  end
-
-  local ignored_humanoids
-  if options.check_humanoids and #ingress_tiles > 0 then
-    ignored_humanoids =
-      world:_collectBlockingOffAreaPreExistingInvalidHumanoids(ingress_tiles)
+    door_tile = {x = x, y = y}
   end
 
   local protected_valid
   if #ingress_tiles > 0 then
-    protected_valid = self:_withProspectiveRoomTopology(function()
-      return world:areBlockingOffAreaProtectedEndpointsReachable(ingress_tiles, {
-        extra_tiles = extra_tiles,
-        ignored_room = self.room,
-        check_humanoids = options.check_humanoids,
-        ignored_humanoids = ignored_humanoids,
-      })
+    local boundary_tiles = self:_getProspectiveRoomBoundaryTiles()
+    local impact_baseline = world:_captureBlockingOffAreaImpactBaseline(
+      ingress_tiles, boundary_tiles)
+
+    local first_pass = self:_withProspectiveRoomTopology(function()
+      if door_tile and not world:isTileConnectedToBlockingOffAreaIngress(
+          door_tile.x, door_tile.y, ingress_tiles) then
+        return {unsafe = true}
+      end
+
+      if options.check_humanoids then
+        local ingress_broken, blocked_areas =
+          world:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
+        if ingress_broken then return {unsafe = true} end
+        return {unsafe = false, blocked_areas = blocked_areas}
+      end
+      return {unsafe = false}
     end)
+
+    protected_valid = not first_pass.unsafe
+    if protected_valid and first_pass.blocked_areas and
+        #first_pass.blocked_areas > 0 then
+      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
+        ingress_tiles, {
+          ignored_room = self.room,
+          check_humanoids = options.check_humanoids,
+        })
+      protected_valid = not self:_withProspectiveRoomTopology(function()
+        return world:_blockingOffAreasContainProtectedEndpoint(
+          first_pass.blocked_areas, endpoints)
+      end)
+    end
   end
 
   if has_normal_spawns then

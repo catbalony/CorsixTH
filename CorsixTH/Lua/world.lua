@@ -1635,19 +1635,18 @@ function World:isHumanoidConnectedToBlockingOffAreaIngress(x, y, ingress_tiles)
   return true
 end
 
--- Collect protected corridor endpoints without performing pathfinding. Ordinary
--- endpoints require a passable tile; humanoid endpoints use their separate
--- pathfinding rule because their current tile may be non-passable.
+-- Collect protected corridor endpoints without performing pathfinding. This is
+-- intentionally cheap; pathfinding is only performed later if a candidate has
+-- actually created a new blocked component.
 function World:_collectBlockingOffAreaProtectedEndpoints(options)
   options = options or {}
-  local protected_tiles = {}
-  local humanoid_tiles = {}
+  local endpoints = {}
 
   for _, room in pairs(self.rooms) do
     if room ~= options.ignored_room and room.door and room.door.tile_x and
         room.door.tile_y then
       local x, y = room:getEntranceXY(false)
-      protected_tiles[#protected_tiles + 1] = {x = x, y = y}
+      endpoints[#endpoints + 1] = {x = x, y = y, description = "room door"}
     end
   end
 
@@ -1658,9 +1657,10 @@ function World:_collectBlockingOffAreaProtectedEndpoints(options)
       for _, name in ipairs(reception_usage_positions) do
         local position = orientation[name]
         if position then
-          protected_tiles[#protected_tiles + 1] = {
+          endpoints[#endpoints + 1] = {
             x = entity.tile_x + position[1],
             y = entity.tile_y + position[2],
+            description = "Reception Desk " .. name,
           }
         end
       end
@@ -1669,81 +1669,187 @@ function World:_collectBlockingOffAreaProtectedEndpoints(options)
 
   if options.check_humanoids and not allow_blocking_off_humanoids then
     for _, entity in ipairs(self.entities) do
-      if class.is(entity, Humanoid) and entity.tile_x and entity.tile_y and
-          not (options.ignored_humanoids and options.ignored_humanoids[entity]) then
-        humanoid_tiles[#humanoid_tiles + 1] = {x = entity.tile_x, y = entity.tile_y}
+      if class.is(entity, Humanoid) and entity.tile_x and entity.tile_y then
+        local x, y = entity.tile_x, entity.tile_y
+        local action = entity.getCurrentAction and entity:getCurrentAction()
+
+        -- Object-use animations can temporarily move the humanoid's entity tile
+        -- onto a non-walkable render tile. Use the logical walking position when
+        -- it is available so an affected blocked component can still be tested.
+        if action and action.name == "use_object" and action.old_tile_x and
+            action.old_tile_y then
+          x, y = action.old_tile_x, action.old_tile_y
+        elseif action and action.name == "multi_use_object" and action.object then
+          local object = action.object
+          local layout = object.object_type.orientations[object.direction]
+          local position = layout.finish_use_position or layout.use_position
+          if position then
+            x, y = object.tile_x + position[1], object.tile_y + position[2]
+          end
+        elseif action and action.name == "staff_reception" and action.object and
+            action.object.getSecondaryUsageTile then
+          x, y = action.object:getSecondaryUsageTile()
+        end
+
+        endpoints[#endpoints + 1] = {
+          x = x,
+          y = y,
+          description = entity.humanoid_class or class.type(entity) or "Humanoid",
+          action = action and action.name,
+        }
       end
     end
   end
 
-  return protected_tiles, humanoid_tiles
+  return endpoints
 end
 
--- Collect humanoids which are already disconnected before a prospective
--- placement is applied. Their current tile can be a temporary animation tile
--- (for example a member of staff using a sofa), so they must not make an
--- unrelated candidate placement fail. Log every ignored baseline state so the
--- reason remains visible when diagnosing placement behavior.
-function World:_collectBlockingOffAreaPreExistingInvalidHumanoids(ingress_tiles)
-  local ignored_humanoids = {}
-  if allow_blocking_off_humanoids or not ingress_tiles or #ingress_tiles == 0 then
-    return ignored_humanoids
-  end
-
-  for _, entity in ipairs(self.entities) do
-    if class.is(entity, Humanoid) and entity.tile_x and entity.tile_y and
-        not self:isHumanoidConnectedToBlockingOffAreaIngress(
-          entity.tile_x, entity.tile_y, ingress_tiles) then
-      ignored_humanoids[entity] = true
-      local action = entity.getCurrentAction and entity:getCurrentAction()
-      local humanoid_type = entity.humanoid_class or class.type(entity) or "Humanoid"
-      local action_name = action and action.name or "unknown"
-      self:gameLog(("Warning: Ignoring pre-existing path-invalid humanoid %s " ..
-          "at (%d, %d) during blocking-off-area placement check (action: %s).")
-        :format(humanoid_type, entity.tile_x, entity.tile_y, action_name))
-    end
-  end
-
-  return ignored_humanoids
+local function blockingOffAreaTileKey(x, y)
+  return x .. ":" .. y
 end
 
---! Check all protected corridor endpoints against a captured ingress set.
---!param ingress_tiles (table) Pre-captured ingress tiles.
---!param options (optional table) Endpoint collection options: extra_tiles,
---! ignored_room, and check_humanoids.
---!return (boolean) Whether every required endpoint is connected to every ingress.
-function World:areBlockingOffAreaProtectedEndpointsReachable(ingress_tiles, options)
-  options = options or {}
-  if not ingress_tiles or #ingress_tiles == 0 then return false end
+-- Capture only the local topology needed to decide whether a candidate has a
+-- meaningful connectivity effect. No room, desk, or humanoid scan happens here.
+function World:_captureBlockingOffAreaImpactBaseline(ingress_tiles, boundary_tiles)
+  local map = self.map.th
+  local baseline = {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
+  local seen = {}
 
-  -- The ingress anchors must themselves remain one usable network.
-  if not self:isTileConnectedToBlockingOffAreaIngress(
-      ingress_tiles[1].x, ingress_tiles[1].y, ingress_tiles) then
-    return false
-  end
-
-  local protected_tiles, humanoid_tiles =
-    self:_collectBlockingOffAreaProtectedEndpoints(options)
-
-  for _, tile in ipairs(protected_tiles) do
-    if not self:isTileConnectedToBlockingOffAreaIngress(tile.x, tile.y, ingress_tiles) then
-      return false
+  for _, tile in ipairs(boundary_tiles or {}) do
+    local x, y = tile.x, tile.y
+    local key = x and y and blockingOffAreaTileKey(x, y)
+    if key and not seen[key] and self:isOnMap(x, y) and
+        map:getCellFlags(x, y).passable then
+      seen[key] = true
+      baseline.tiles[#baseline.tiles + 1] = {x = x, y = y}
+      local reaches = false
+      for _, ingress in ipairs(ingress_tiles or {}) do
+        if self:isOnMap(ingress.x, ingress.y) and
+            map:getCellFlags(ingress.x, ingress.y).passable and
+            self.pathfinder:findDistance(x, y, ingress.x, ingress.y) then
+          reaches = true
+          break
+        end
+      end
+      baseline.reaches_ingress[#baseline.tiles] = reaches
     end
   end
 
-  for _, tile in ipairs(humanoid_tiles) do
-    if not self:isHumanoidConnectedToBlockingOffAreaIngress(tile.x, tile.y, ingress_tiles) then
-      return false
+  -- Only remember ingress pairs which are connected before placement. A
+  -- pre-existing broken spawn network must not poison an unrelated placement.
+  for i = 1, #(ingress_tiles or {}) do
+    local a = ingress_tiles[i]
+    if self:isOnMap(a.x, a.y) and map:getCellFlags(a.x, a.y).passable then
+      for j = i + 1, #ingress_tiles do
+        local b = ingress_tiles[j]
+        if self:isOnMap(b.x, b.y) and map:getCellFlags(b.x, b.y).passable and
+            self.pathfinder:findDistance(a.x, a.y, b.x, b.y) then
+          baseline.ingress_pairs[#baseline.ingress_pairs + 1] = {i, j}
+        end
+      end
     end
   end
 
-  for _, tile in ipairs(options.extra_tiles or {}) do
-    if not self:isTileConnectedToBlockingOffAreaIngress(tile.x, tile.y, ingress_tiles) then
-      return false
+  return baseline
+end
+
+-- With the candidate topology active, report whether it broke a previously
+-- connected ingress pair and which newly-created local components can no
+-- longer reach any ingress. Existing blocked components are ignored.
+function World:_getBlockingOffAreaImpact(ingress_tiles, baseline)
+  local map = self.map.th
+
+  for _, pair in ipairs(baseline.ingress_pairs or {}) do
+    local a, b = ingress_tiles[pair[1]], ingress_tiles[pair[2]]
+    if not self.pathfinder:findDistance(a.x, a.y, b.x, b.y) then
+      return true, {}
     end
   end
 
-  return true
+  local components = {}
+  for index, tile in ipairs(baseline.tiles or {}) do
+    if map:getCellFlags(tile.x, tile.y).passable then
+      local component
+      for _, candidate in ipairs(components) do
+        if self.pathfinder:findDistance(
+            tile.x, tile.y, candidate.rep.x, candidate.rep.y) then
+          component = candidate
+          break
+        end
+      end
+      if not component then
+        component = {rep = tile, indices = {}}
+        components[#components + 1] = component
+      end
+      component.indices[#component.indices + 1] = index
+    end
+  end
+
+  local blocked_areas = {}
+  for _, component in ipairs(components) do
+    local reaches_ingress = false
+    for _, ingress in ipairs(ingress_tiles or {}) do
+      if self:isOnMap(ingress.x, ingress.y) and
+          map:getCellFlags(ingress.x, ingress.y).passable and
+          self.pathfinder:findDistance(
+            component.rep.x, component.rep.y, ingress.x, ingress.y) then
+        reaches_ingress = true
+        break
+      end
+    end
+
+    if not reaches_ingress then
+      local newly_blocked = false
+      for _, index in ipairs(component.indices) do
+        if baseline.reaches_ingress[index] then
+          newly_blocked = true
+          break
+        end
+      end
+      if newly_blocked then
+        blocked_areas[#blocked_areas + 1] = component.rep
+      end
+    end
+  end
+
+  return false, blocked_areas
+end
+
+-- Capture validity only after the cheap topology-impact test has found a new
+-- blocked component. This keeps the common placement path free of global
+-- room/desk/humanoid pathfinding work.
+function World:_captureBlockingOffAreaProtectedBaseline(ingress_tiles, options)
+  local endpoints = self:_collectBlockingOffAreaProtectedEndpoints(options)
+  for _, endpoint in ipairs(endpoints) do
+    endpoint.was_valid = self:isTileConnectedToBlockingOffAreaIngress(
+      endpoint.x, endpoint.y, ingress_tiles)
+    if endpoint.action then
+      endpoint.was_valid = self:isHumanoidConnectedToBlockingOffAreaIngress(
+        endpoint.x, endpoint.y, ingress_tiles)
+    end
+  end
+  return endpoints
+end
+
+-- Check only endpoints which are actually inside a newly-created blocked
+-- component. A pre-existing invalid endpoint is not blamed on this placement,
+-- but is written to the game log for diagnostics.
+function World:_blockingOffAreasContainProtectedEndpoint(blocked_areas, endpoints)
+  for _, endpoint in ipairs(endpoints or {}) do
+    for _, area in ipairs(blocked_areas or {}) do
+      if self.pathfinder:findDistance(endpoint.x, endpoint.y, area.x, area.y) then
+        if endpoint.was_valid then
+          return true
+        end
+        local suffix = endpoint.action and " (action: " .. endpoint.action .. ")" or ""
+        self:gameLog(("Warning: Ignoring pre-existing path-invalid %s at (%d, %d) " ..
+            "during blocking-off-area placement check%s.")
+          :format(endpoint.description, endpoint.x, endpoint.y, suffix))
+        break
+      end
+    end
+  end
+  return false
 end
 
 -- Return the directional passability that removing one SideObject would leave.
@@ -1870,12 +1976,63 @@ end
 -- Evaluate a candidate as "remove the picked-up object, then add the candidate"
 -- while restoring every touched pathfinding flag afterwards.
 function World:_withProspectiveCorridorObjectTopology(x, y, object, orientation,
-    existing_object, callback)
+    existing_object, callback, before_candidate)
   return withRestoredPathfindingFlags(self, function(set_flag)
     self:_removeExistingCorridorObjectTopology(existing_object, set_flag)
+    local baseline = before_candidate and before_candidate()
     self:_addCorridorObjectTopology(x, y, object, orientation, set_flag)
-    return callback()
+    return callback(baseline)
   end)
+end
+
+function World:_getCorridorCandidateBoundaryTiles(x, y, object, orientation)
+  local layout = object.orientations[orientation]
+  local boundary = {}
+
+  if object.class == "SideObject" then
+    local parameters = getSideObjectParameters(object, orientation)
+    for _, tile in ipairs(layout.footprint) do
+      if tile.only_side then
+        local tile_x, tile_y = x + tile[1], y + tile[2]
+        boundary[#boundary + 1] = {x = tile_x, y = tile_y}
+        boundary[#boundary + 1] = {
+          x = tile_x + parameters.x,
+          y = tile_y + parameters.y,
+        }
+      end
+    end
+    return boundary
+  end
+
+  local adjacent = layout.adjacent_to_solid_footprint
+  if adjacent then
+    for _, tile in ipairs(adjacent) do
+      boundary[#boundary + 1] = {x = x + tile[1], y = y + tile[2]}
+    end
+    return boundary
+  end
+
+  -- Small test/object definitions may not have Object's derived adjacency data.
+  -- Derive the same four-neighbour boundary directly from the solid footprint.
+  local solid, seen = {}, {}
+  for _, tile in ipairs(layout.footprint) do
+    if not tile.only_passable and not tile.only_side then
+      solid[blockingOffAreaTileKey(tile[1], tile[2])] = true
+    end
+  end
+  for _, tile in ipairs(layout.footprint) do
+    if not tile.only_passable and not tile.only_side then
+      for _, delta in ipairs({{-1, 0}, {1, 0}, {0, -1}, {0, 1}}) do
+        local dx, dy = tile[1] + delta[1], tile[2] + delta[2]
+        local key = blockingOffAreaTileKey(dx, dy)
+        if not solid[key] and not seen[key] then
+          seen[key] = true
+          boundary[#boundary + 1] = {x = x + dx, y = y + dy}
+        end
+      end
+    end
+  end
+  return boundary
 end
 
 function World:_getCorridorCandidateProtectedTiles(x, y, object, orientation)
@@ -1895,62 +2052,70 @@ function World:_getCorridorCandidateProtectedTiles(x, y, object, orientation)
   return protected_tiles
 end
 
--- Return whether the candidate disconnects the endpoints relevant to this check.
-function World:_isCorridorCandidateConnectivityUnsafe(ingress_tiles, candidate_tiles,
-    check_existing, ignored_humanoids)
-  if check_existing then
-    return not self:areBlockingOffAreaProtectedEndpointsReachable(ingress_tiles, {
-      extra_tiles = candidate_tiles,
-      check_humanoids = true,
-      ignored_humanoids = ignored_humanoids,
-    })
-  end
-
-  for _, tile in ipairs(candidate_tiles) do
-    if not self:isTileConnectedToBlockingOffAreaIngress(tile.x, tile.y, ingress_tiles) then
-      return true
-    end
-  end
-  return false
-end
-
---! Test a prospective corridor object topology for protected endpoints.
---!param x (integer) Candidate object X coordinate.
---!param y (integer) Candidate object Y coordinate.
---!param object (table) Candidate object type.
---!param orientation (string) Candidate orientation.
---!param options (optional table) existing_object, check_existing, and strict_check.
---! strict_check runs inside the same prospective topology transaction.
---!return (boolean or nil, boolean) Unsafe result (nil when there are no ingress
---! anchors at all) and whether normal spawn points exist.
+--! Test a prospective corridor object topology. Ordinary placements first run
+--! a cheap local topology-impact check; existing doors, Reception Desks and
+--! humanoids are examined only if the candidate actually creates a new blocked
+--! component. Candidate Reception Desk usage tiles are always checked directly.
 function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation, options)
   options = options or {}
   local ingress_tiles, has_normal_spawns = self:getBlockingOffAreaIngressTiles()
-  local ignored_humanoids
-  if options.check_existing and #ingress_tiles > 0 then
-    ignored_humanoids =
-      self:_collectBlockingOffAreaPreExistingInvalidHumanoids(ingress_tiles)
-  end
+  local boundary_tiles = self:_getCorridorCandidateBoundaryTiles(
+    x, y, object, orientation)
+  local candidate_tiles = self:_getCorridorCandidateProtectedTiles(
+    x, y, object, orientation)
 
-  local unsafe = self:_withProspectiveCorridorObjectTopology(
-    x, y, object, orientation, options.existing_object, function()
-      local protected_unsafe
+  local first_pass = self:_withProspectiveCorridorObjectTopology(
+    x, y, object, orientation, options.existing_object, function(impact_baseline)
       if #ingress_tiles > 0 then
-        local candidate_tiles = self:_getCorridorCandidateProtectedTiles(
-          x, y, object, orientation)
-        protected_unsafe = self:_isCorridorCandidateConnectivityUnsafe(
-          ingress_tiles, candidate_tiles, options.check_existing, ignored_humanoids)
+        -- A newly placed Reception Desk is a protected endpoint in its own
+        -- right, even if the candidate does not otherwise split the corridor.
+        for _, tile in ipairs(candidate_tiles) do
+          if not self:isTileConnectedToBlockingOffAreaIngress(
+              tile.x, tile.y, ingress_tiles) then
+            return {unsafe = true}
+          end
+        end
+
+        if options.check_existing and impact_baseline then
+          local ingress_broken, blocked_areas =
+            self:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
+          if ingress_broken then return {unsafe = true} end
+          if #blocked_areas > 0 then
+            return {unsafe = false, blocked_areas = blocked_areas}
+          end
+        end
       end
 
       -- Without normal spawn points, retain the legacy strict rule. The strict
       -- check must run before rollback so moves still see -old + candidate.
       if not has_normal_spawns and options.strict_check and options.strict_check() then
-        return true
+        return {unsafe = true}
       end
-      return protected_unsafe
+      return {unsafe = false}
+    end, function()
+      if options.check_existing and #ingress_tiles > 0 then
+        return self:_captureBlockingOffAreaImpactBaseline(
+          ingress_tiles, boundary_tiles)
+      end
     end)
 
-  return unsafe, has_normal_spawns
+  if first_pass.unsafe then return true, has_normal_spawns end
+  if not first_pass.blocked_areas then return false, has_normal_spawns end
+
+  -- Only an actually-created blocked component justifies the more expensive
+  -- protected-endpoint scan. Capture baseline validity after removing an old
+  -- moved object but before applying the candidate.
+  local protected_unsafe = self:_withProspectiveCorridorObjectTopology(
+    x, y, object, orientation, options.existing_object, function(endpoints)
+      return self:_blockingOffAreasContainProtectedEndpoint(
+        first_pass.blocked_areas, endpoints)
+    end, function()
+      return self:_captureBlockingOffAreaProtectedBaseline(ingress_tiles, {
+        check_humanoids = true,
+      })
+    end)
+
+  return protected_unsafe, has_normal_spawns
 end
 
 function World:getPath(x, y, dest_x, dest_y)

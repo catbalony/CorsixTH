@@ -50,14 +50,27 @@ describe("special-map blocked-area UI connectivity", function()
     function world:getBlockingOffAreaIngressTiles()
       return ingress_tiles, has_normal_spawns
     end
-    function world:areBlockingOffAreaProtectedEndpointsReachable()
-      calls.protected = calls.protected + 1
+    function world:_captureBlockingOffAreaImpactBaseline()
+      return {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
+    end
+    function world:_getBlockingOffAreaImpact()
+      return false, protected_result and {} or {{x = 1, y = 1}}
+    end
+    function world:isTileConnectedToBlockingOffAreaIngress()
       return protected_result
+    end
+    function world:_captureBlockingOffAreaProtectedBaseline()
+      calls.protected = calls.protected + 1
+      return {}
+    end
+    function world:_blockingOffAreasContainProtectedEndpoint()
+      return not protected_result
     end
 
     local edit_room = {
       ui = {app = {world = world}},
       room = nil,
+      blueprint_rect = {x = 2, y = 2, w = 2, h = 2},
     }
     setmetatable(edit_room, {__index = UIEditRoom})
     function edit_room:_getBlueprintDoorOutsideTile()
