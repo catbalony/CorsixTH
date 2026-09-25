@@ -1048,6 +1048,12 @@ function UIEditRoom:_isProspectiveRoomNetworkValid(options)
     extra_tiles[1] = {x = x, y = y}
   end
 
+  local ignored_humanoids
+  if options.check_humanoids and #ingress_tiles > 0 then
+    ignored_humanoids =
+      world:_collectBlockingOffAreaPreExistingInvalidHumanoids(ingress_tiles)
+  end
+
   local protected_valid
   if #ingress_tiles > 0 then
     protected_valid = self:_withProspectiveRoomTopology(function()
@@ -1055,6 +1061,7 @@ function UIEditRoom:_isProspectiveRoomNetworkValid(options)
         extra_tiles = extra_tiles,
         ignored_room = self.room,
         check_humanoids = options.check_humanoids,
+        ignored_humanoids = ignored_humanoids,
       })
     end)
   end

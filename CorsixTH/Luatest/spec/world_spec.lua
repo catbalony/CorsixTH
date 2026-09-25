@@ -42,6 +42,7 @@ _G._A = saved_A
 
 local World = _G["World"]
 local EntityMap = _G["EntityMap"]
+local Humanoid = _G["Humanoid"]
 
 describe("world.lua: ", function()
   local function makeWorld(entities)
@@ -828,6 +829,115 @@ describe("world.lua: ", function()
         3, 1, object_type, "north", {check_existing = false})
       assert.is_false(unsafe)
       assert.is_true(flags["3:1"].passable)
+    end)
+
+    it("ignores and logs a humanoid already disconnected before placement", function()
+      local map, flags = makeFlagMap({
+        ["1:1"] = {passable = true},
+        ["2:2"] = {passable = false},
+        ["3:1"] = {passable = true},
+      })
+      local humanoid = {
+        tile_x = 2,
+        tile_y = 2,
+        humanoid_class = "Nurse",
+        action_queue = {{name = "use_object"}},
+      }
+      setmetatable(humanoid, {__index = Humanoid})
+      function humanoid:getCurrentAction()
+        return self.action_queue[1]
+      end
+
+      local world = makeWorld({humanoid})
+      world.map = {th = map}
+      world.spawn_points = {{x = 1, y = 1}}
+      world.rooms = {}
+      world.objects = {}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 3 and 1 <= y and y <= 2
+      end
+      world.getLocalPlayerHospital = function() return nil end
+      world.pathfinder = {
+        findDistance = function(_, x1, y1, x2, y2)
+          if x1 == 1 and y1 == 1 and x2 == 1 and y2 == 1 then return 0 end
+          return nil
+        end,
+      }
+      local logs = {}
+      world.gameLog = function(_, message)
+        logs[#logs + 1] = message
+      end
+
+      local object_type = {
+        id = "plant",
+        class = "Object",
+        orientations = {north = {footprint = {{0, 0}}}},
+      }
+
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {check_existing = true})
+
+      assert.is_false(unsafe)
+      assert.is_true(flags["3:1"].passable)
+      assert.are.equal(1, #logs)
+      assert.is_truthy(logs[1]:find("Nurse", 1, true))
+      assert.is_truthy(logs[1]:find("(2, 2)", 1, true))
+      assert.is_truthy(logs[1]:find("use_object", 1, true))
+    end)
+
+    it("still rejects a candidate that disconnects a previously valid humanoid", function()
+      local map, flags = makeFlagMap({
+        ["1:1"] = {passable = true},
+        ["2:2"] = {passable = true},
+        ["3:1"] = {passable = true},
+      })
+      local humanoid = {
+        tile_x = 2,
+        tile_y = 2,
+        humanoid_class = "Nurse",
+        action_queue = {{name = "idle"}},
+      }
+      setmetatable(humanoid, {__index = Humanoid})
+      function humanoid:getCurrentAction()
+        return self.action_queue[1]
+      end
+
+      local world = makeWorld({humanoid})
+      world.map = {th = map}
+      world.spawn_points = {{x = 1, y = 1}}
+      world.rooms = {}
+      world.objects = {}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 3 and 1 <= y and y <= 2
+      end
+      world.getLocalPlayerHospital = function() return nil end
+      world.pathfinder = {
+        findDistance = function(_, x1, y1, x2, y2)
+          if x1 == 1 and y1 == 1 and x2 == 1 and y2 == 1 then return 0 end
+          if x1 == 2 and y1 == 2 and x2 == 1 and y2 == 1 and
+              flags["3:1"].passable then
+            return 1
+          end
+          return nil
+        end,
+      }
+      local logs = {}
+      world.gameLog = function(_, message)
+        logs[#logs + 1] = message
+      end
+
+      local object_type = {
+        id = "plant",
+        class = "Object",
+        orientations = {north = {footprint = {{0, 0}}}},
+      }
+
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {check_existing = true})
+
+      assert.is_true(unsafe)
+      assert.is_true(flags["3:1"].passable)
+      assert.are.equal(0, #logs)
     end)
 
     it("rolls back zero-spawn move topology when the fallback errors", function()

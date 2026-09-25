@@ -1669,13 +1669,42 @@ function World:_collectBlockingOffAreaProtectedEndpoints(options)
 
   if options.check_humanoids and not allow_blocking_off_humanoids then
     for _, entity in ipairs(self.entities) do
-      if class.is(entity, Humanoid) and entity.tile_x and entity.tile_y then
+      if class.is(entity, Humanoid) and entity.tile_x and entity.tile_y and
+          not (options.ignored_humanoids and options.ignored_humanoids[entity]) then
         humanoid_tiles[#humanoid_tiles + 1] = {x = entity.tile_x, y = entity.tile_y}
       end
     end
   end
 
   return protected_tiles, humanoid_tiles
+end
+
+-- Collect humanoids which are already disconnected before a prospective
+-- placement is applied. Their current tile can be a temporary animation tile
+-- (for example a member of staff using a sofa), so they must not make an
+-- unrelated candidate placement fail. Log every ignored baseline state so the
+-- reason remains visible when diagnosing placement behavior.
+function World:_collectBlockingOffAreaPreExistingInvalidHumanoids(ingress_tiles)
+  local ignored_humanoids = {}
+  if allow_blocking_off_humanoids or not ingress_tiles or #ingress_tiles == 0 then
+    return ignored_humanoids
+  end
+
+  for _, entity in ipairs(self.entities) do
+    if class.is(entity, Humanoid) and entity.tile_x and entity.tile_y and
+        not self:isHumanoidConnectedToBlockingOffAreaIngress(
+          entity.tile_x, entity.tile_y, ingress_tiles) then
+      ignored_humanoids[entity] = true
+      local action = entity.getCurrentAction and entity:getCurrentAction()
+      local humanoid_type = entity.humanoid_class or class.type(entity) or "Humanoid"
+      local action_name = action and action.name or "unknown"
+      self:gameLog(("Warning: Ignoring pre-existing path-invalid humanoid %s " ..
+          "at (%d, %d) during blocking-off-area placement check (action: %s).")
+        :format(humanoid_type, entity.tile_x, entity.tile_y, action_name))
+    end
+  end
+
+  return ignored_humanoids
 end
 
 --! Check all protected corridor endpoints against a captured ingress set.
@@ -1868,11 +1897,12 @@ end
 
 -- Return whether the candidate disconnects the endpoints relevant to this check.
 function World:_isCorridorCandidateConnectivityUnsafe(ingress_tiles, candidate_tiles,
-    check_existing)
+    check_existing, ignored_humanoids)
   if check_existing then
     return not self:areBlockingOffAreaProtectedEndpointsReachable(ingress_tiles, {
       extra_tiles = candidate_tiles,
       check_humanoids = true,
+      ignored_humanoids = ignored_humanoids,
     })
   end
 
@@ -1896,6 +1926,11 @@ end
 function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation, options)
   options = options or {}
   local ingress_tiles, has_normal_spawns = self:getBlockingOffAreaIngressTiles()
+  local ignored_humanoids
+  if options.check_existing and #ingress_tiles > 0 then
+    ignored_humanoids =
+      self:_collectBlockingOffAreaPreExistingInvalidHumanoids(ingress_tiles)
+  end
 
   local unsafe = self:_withProspectiveCorridorObjectTopology(
     x, y, object, orientation, options.existing_object, function()
@@ -1904,7 +1939,7 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation, 
         local candidate_tiles = self:_getCorridorCandidateProtectedTiles(
           x, y, object, orientation)
         protected_unsafe = self:_isCorridorCandidateConnectivityUnsafe(
-          ingress_tiles, candidate_tiles, options.check_existing)
+          ingress_tiles, candidate_tiles, options.check_existing, ignored_humanoids)
       end
 
       -- Without normal spawn points, retain the legacy strict rule. The strict
