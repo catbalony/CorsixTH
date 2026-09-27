@@ -51,7 +51,7 @@ describe("special-map blocked-area UI connectivity", function()
       return ingress_tiles, has_normal_spawns
     end
     function world:_captureBlockingOffAreaImpactBaseline()
-      return {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
+      return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
     end
     function world:_getBlockingOffAreaImpact()
       return false, protected_result and {} or {{x = 1, y = 1}}
@@ -59,11 +59,14 @@ describe("special-map blocked-area UI connectivity", function()
     function world:isTileConnectedToBlockingOffAreaIngress()
       return protected_result
     end
+    function world:_collectBlockingOffAreaTiles()
+      return {["1:1"] = true}
+    end
     function world:_captureBlockingOffAreaProtectedBaseline()
       calls.protected = calls.protected + 1
       return {}
     end
-    function world:_blockingOffAreasContainProtectedEndpoint()
+    function world:_blockingOffAreaProtectedEndpointsUnsafe()
       return not protected_result
     end
 
