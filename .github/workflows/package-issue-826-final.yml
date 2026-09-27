@@ -1,0 +1,148 @@
+name: Package optimized issue 826 handoff
+
+on:
+  push:
+    branches:
+      - review/issue-826-package-final
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=011b07a698c972b7a7c4e70e41d592f638182b0e
+          FINAL=274c887b854143a7608da97f56b8916a54a6d288
+          OUT=handoff
+          ZIP=CorsixTH_826_OPTIMIZED_final_developer_handoff.zip
+          mkdir -p "$OUT"
+
+          git diff --binary "$BASE" "$FINAL" -- \
+            CorsixTH/Lua/dialogs/edit_room.lua \
+            CorsixTH/Lua/dialogs/place_objects.lua \
+            CorsixTH/Lua/dialogs/place_staff.lua \
+            CorsixTH/Lua/world.lua \
+            CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
+            CorsixTH/Luatest/spec/world_spec.lua > "$OUT/FINAL_PATCH.diff"
+          test -s "$OUT/FINAL_PATCH.diff"
+
+          cat > "$OUT/DEV_README.md" <<'EOF'
+          # CorsixTH issue #826 developer handoff
+
+          This package contains the final optimized implementation for issue #826.
+
+          - Exact base commit: `011b07a698c972b7a7c4e70e41d592f638182b0e`
+          - Final optimized commit: `274c887b854143a7608da97f56b8916a54a6d288`
+          - Review branch: `review/issue-826-final`
+
+          ## Apply
+
+          From an exact checkout of the base commit:
+
+          ```sh
+          git apply --check FINAL_PATCH.diff
+          git apply FINAL_PATCH.diff
+          ```
+
+          The patch changes only these six files:
+
+          - `CorsixTH/Lua/dialogs/edit_room.lua`
+          - `CorsixTH/Lua/dialogs/place_objects.lua`
+          - `CorsixTH/Lua/dialogs/place_staff.lua`
+          - `CorsixTH/Lua/world.lua`
+          - `CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua`
+          - `CorsixTH/Luatest/spec/world_spec.lua`
+
+          ## Final behavior
+
+          Validation is impact-first. Normal object placement does not scan every door, Reception Desk, or humanoid. It first determines whether the candidate breaks a previously connected spawn network or creates a newly enclosed area. Protected endpoints are inspected only when there is an actual topology impact.
+
+          The performance follow-up removes the laggy global second-stage scan. Newly enclosed components are flood-filled and represented as affected tile sets, so protected endpoints outside those tiles require no pathfinding. Spawn connectivity is represented by pre-existing ingress connected components rather than all spawn-point pairs, and affected endpoints reuse one representative per ingress component. The transient object-use humanoid case is retained by using the humanoid's logical pre-use walking tile where appropriate.
+
+          Historical zero-ingress behavior is preserved, and pre-existing invalid protected endpoints encountered inside a newly affected area are logged rather than silently poisoning unrelated placement.
+
+          ## Validation
+
+          Final head `274c887b854143a7608da97f56b8916a54a6d288` passed the complete CorsixTH Linux and Windows GitHub Actions matrices, including Lua 5.1 tests/source/docs, LuaJIT, Lua 5.5/native/clang checks, and Windows build/CTest/install.
+
+          Final CI runs:
+
+          - Linux: `36304796981`
+          - Windows: `36304796881`
+
+          Recommended manual performance confirmation: load `Argus_SuperDuper_100.sav.zip`, surround one empty tile with four plants, and verify that placing the fourth plant no longer produces the previous large lag spike.
+          EOF
+
+          cat > "$OUT/FINAL_REVIEW.md" <<'EOF'
+          # Final review — CorsixTH issue #826
+
+          ## What caused the reported lag
+
+          The first impact-first implementation correctly avoided protected-endpoint work for ordinary placements, but once any new enclosed component was detected it still built a baseline by pathfinding every room door, Reception Desk endpoint, and humanoid in the hospital. A one-tile pocket created by the fourth plant could therefore trigger hundreds of unrelated path searches on a large save.
+
+          ## Optimizations in the final implementation
+
+          1. Newly enclosed components are flood-filled once and converted to tile hashes.
+          2. Only protected endpoints whose logical coordinates lie in those affected tiles are considered for the second-stage baseline.
+          3. Empty enclosed areas therefore perform no global humanoid/door/desk pathfinding.
+          4. Spawn-point topology uses pre-existing connected components instead of storing/checking every connected spawn pair, removing the quadratic all-pairs pattern.
+          5. Affected endpoint baseline checks reuse one representative per ingress component instead of checking every spawn point.
+          6. Duplicate humanoid reachability work was removed.
+          7. Reception Desk candidate usage checks reuse the computed ingress network where possible.
+
+          This preserves the important delta semantics: pre-existing split networks and pre-existing invalid endpoints do not make unrelated placements fail; only topology damage caused by the candidate matters. The sofa-Nurse transient-position regression remains covered by using the logical walking position during object use.
+
+          The unrelated SideObject object-collection lookup was deliberately left unchanged because it is not on the reported plant-placement path and changing it would carry additional wall-edge correctness risk without evidence that it is a meaningful bottleneck.
+
+          ## Status
+
+          Final optimized head: `274c887b854143a7608da97f56b8916a54a6d288`
+
+          Linux and Windows CI are green. No known build or automated-test failure remains. The outstanding useful check is manual performance confirmation with the developer's `Argus_SuperDuper_100.sav.zip` four-plant reproduction.
+          EOF
+
+          (
+            cd "$OUT"
+            sha256sum FINAL_PATCH.diff DEV_README.md FINAL_REVIEW.md > SHA256SUMS.txt
+            zip -9 "../$ZIP" FINAL_PATCH.diff DEV_README.md FINAL_REVIEW.md SHA256SUMS.txt
+          )
+
+          unzip -t "$ZIP"
+          test "$(unzip -Z1 "$ZIP" | wc -l)" -eq 4
+          test "$(unzip -Z1 "$ZIP" | sort | tr '\n' ' ')" = "DEV_README.md FINAL_PATCH.diff FINAL_REVIEW.md SHA256SUMS.txt "
+
+          rm -rf verify
+          mkdir verify
+          git archive "$BASE" | tar -x -C verify
+          (cd verify && git apply --check "../$OUT/FINAL_PATCH.diff" && git apply "../$OUT/FINAL_PATCH.diff")
+
+          for f in \
+            CorsixTH/Lua/dialogs/edit_room.lua \
+            CorsixTH/Lua/dialogs/place_objects.lua \
+            CorsixTH/Lua/dialogs/place_staff.lua \
+            CorsixTH/Lua/world.lua \
+            CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
+            CorsixTH/Luatest/spec/world_spec.lua; do
+            expected=$(git rev-parse "$FINAL:$f")
+            actual=$(git hash-object "verify/$f")
+            test "$expected" = "$actual"
+          done
+
+          sha256sum "$ZIP" > "$ZIP.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CorsixTH-826-optimized-final-handoff
+          path: |
+            CorsixTH_826_OPTIMIZED_final_developer_handoff.zip
+            CorsixTH_826_OPTIMIZED_final_developer_handoff.zip.sha256
+          if-no-files-found: error
