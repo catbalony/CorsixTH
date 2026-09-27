@@ -1,0 +1,205 @@
++      local map = makeFlagMap(initial)
++      local world = makeWorld({})
++      world.map = {th = map}
++      world.isOnMap = function(_, x, y)
++        return 1 <= x and x <= 18 and y == 1
++      end
++      local calls = 0
++      world.pathfinder = {
++        findDistance = function()
++          calls = calls + 1
++          return 1
++        end,
++      }
++
++      assert.is_true(world:_areBlockingOffAreaTilesConnectedToIngress(
++        {{x = 17, y = 1}, {x = 18, y = 1}}, ingress))
++      assert.are.equal(17, calls)
++    end)
++
++    it("groups a connected ingress network without all-pairs pathfinding", function()
++      local initial = {}
++      local ingress = {}
++      for x = 1, 16 do
++        initial[x .. ":1"] = {passable = true}
++        ingress[#ingress + 1] = {x = x, y = 1}
++      end
++      local map = makeFlagMap(initial)
++      local world = makeWorld({})
++      world.map = {th = map}
++      world.isOnMap = function(_, x, y)
++        return 1 <= x and x <= 16 and y == 1
++      end
++      local calls = 0
++      world.pathfinder = {
++        findDistance = function()
++          calls = calls + 1
++          return 1
++        end,
++      }
++
++      local baseline = world:_captureBlockingOffAreaImpactBaseline(ingress, {})
++      assert.are.equal(15, calls)
++      assert.are.equal(1, #baseline.ingress_components)
++      assert.are.equal(16, #baseline.ingress_components[1])
++
++      calls = 0
++      local ingress_broken, blocked = world:_getBlockingOffAreaImpact(
++        ingress, baseline)
++      assert.is_false(ingress_broken)
++      assert.are.equal(0, #blocked)
++      assert.are.equal(15, calls)
++    end)
++
++    it("flood-fills only tiles in the newly blocked component", function()
++      local map = makeFlagMap({
++        ["1:1"] = {
++          passable = true,
++          travelEast = true,
++          travelWest = false,
++          travelNorth = false,
++          travelSouth = false,
++        },
++        ["2:1"] = {
++          passable = true,
++          travelEast = true,
++          travelWest = true,
++          travelNorth = false,
++          travelSouth = false,
++        },
++        ["3:1"] = {
++          passable = true,
++          travelEast = false,
++          travelWest = true,
++          travelNorth = false,
++          travelSouth = false,
++        },
++        ["4:1"] = {
++          passable = true,
++          travelEast = false,
++          travelWest = false,
++          travelNorth = false,
++          travelSouth = false,
++        },
++      })
++      local world = makeWorld({})
++      world.map = {th = map}
++      world.isOnMap = function(_, x, y)
++        return 1 <= x and x <= 4 and y == 1
++      end
++
++      local blocked = world:_collectBlockingOffAreaTiles({{x = 1, y = 1}})
++      assert.is_true(blocked["1:1"])
++      assert.is_true(blocked["2:1"])
++      assert.is_true(blocked["3:1"])
++      assert.is_nil(blocked["4:1"])
++    end)
++
++    it("pathfinds only protected endpoints inside the affected tile set", function()
++      local map = makeFlagMap({
++        ["1:1"] = {passable = true},
++        ["2:1"] = {passable = true},
++        ["9:1"] = {passable = true},
++      })
++      local room_inside = {
++        door = {tile_x = 2, tile_y = 1},
++        getEntranceXY = function() return 2, 1 end,
++      }
++      local room_outside = {
++        door = {tile_x = 9, tile_y = 1},
++        getEntranceXY = function() return 9, 1 end,
++      }
++      local world = makeWorld({})
++      world.map = {th = map}
++      world.rooms = {room_inside, room_outside}
++      world.isOnMap = function(_, x, y)
++        return 1 <= x and x <= 9 and y == 1
++      end
++      local calls = 0
++      world.pathfinder = {
++        findDistance = function(_, x1, y1, x2, y2)
++          calls = calls + 1
++          if x1 == 2 and y1 == 1 and x2 == 1 and y2 == 1 then return 1 end
++          return nil
++        end,
++      }
++
++      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
++        {{x = 1, y = 1}}, {
++          affected_tiles = {["2:1"] = true},
++          check_humanoids = true,
++        })
++
++      assert.are.equal(1, #endpoints)
++      assert.are.equal(2, endpoints[1].x)
++      assert.is_true(endpoints[1].was_valid)
++      assert.are.equal(1, calls)
++    end)
++
++    it("does not double-pathfind an affected humanoid", function()
++      local map = makeFlagMap({
++        ["1:1"] = {passable = true},
++        ["2:1"] = {passable = false},
++      })
++      local humanoid = {
++        tile_x = 2,
++        tile_y = 1,
++        humanoid_class = "Nurse",
++        action_queue = {{name = "idle"}},
++      }
++      setmetatable(humanoid, {__index = Humanoid})
++      function humanoid:getCurrentAction()
++        return self.action_queue[1]
++      end
++
++      local world = makeWorld({humanoid})
++      world.map = {th = map}
++      world.rooms = {}
++      world.isOnMap = function(_, x, y)
++        return 1 <= x and x <= 2 and y == 1
++      end
++      local calls = 0
++      world.pathfinder = {
++        findDistance = function(_, x1, y1, x2, y2)
++          calls = calls + 1
++          if x1 == 2 and y1 == 1 and x2 == 1 and y2 == 1 then return 1 end
++          return nil
++        end,
++      }
++
++      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
++        {{x = 1, y = 1}}, {
++          affected_tiles = {["2:1"] = true},
++          check_humanoids = true,
++        })
++
++      assert.are.equal(1, #endpoints)
++      assert.is_true(endpoints[1].was_valid)
++      assert.are.equal(1, calls)
++    end)
++
+     it("ignores a pre-existing blocked boundary component", function()
+       local map = makeFlagMap({
+         ["1:1"] = {passable = true},
+@@ -1001,14 +1194,13 @@ describe("world.lua: ", function()
+         logs[#logs + 1] = message
+       end
+ 
+-      local unsafe = world:_blockingOffAreasContainProtectedEndpoint(
+-        {{x = 2, y = 1}}, {{
+-          x = 2,
+-          y = 1,
+-          description = "Nurse",
+-          action = "use_object",
+-          was_valid = false,
+-        }})
++      local unsafe = world:_blockingOffAreaProtectedEndpointsUnsafe({{
++        x = 2,
++        y = 1,
++        description = "Nurse",
++        action = "use_object",
++        was_valid = false,
++      }})
+ 
+       assert.is_false(unsafe)
+       assert.are.equal(1, #logs)
