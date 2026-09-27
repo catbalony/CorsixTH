@@ -1,0 +1,55 @@
+name: Diagnose issue 826 package
+
+on:
+  push:
+    branches:
+      - review/issue-826-package-final
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Diagnose base-to-final patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=011b07a698c972b7a7c4e70e41d592f638182b0e
+          FINAL=274c887b854143a7608da97f56b8916a54a6d288
+          git diff --binary "$BASE" "$FINAL" -- \
+            CorsixTH/Lua/dialogs/edit_room.lua \
+            CorsixTH/Lua/dialogs/place_objects.lua \
+            CorsixTH/Lua/dialogs/place_staff.lua \
+            CorsixTH/Lua/world.lua \
+            CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
+            CorsixTH/Luatest/spec/world_spec.lua > /tmp/final.diff
+          rm -rf /tmp/verify && mkdir /tmp/verify
+          git archive "$BASE" | tar -x -C /tmp/verify
+          echo APPLY_CHECK
+          (cd /tmp/verify && git apply --check /tmp/final.diff)
+          echo APPLY
+          (cd /tmp/verify && git apply /tmp/final.diff)
+          echo APPLY_OK
+          mismatch=0
+          for f in \
+            CorsixTH/Lua/dialogs/edit_room.lua \
+            CorsixTH/Lua/dialogs/place_objects.lua \
+            CorsixTH/Lua/dialogs/place_staff.lua \
+            CorsixTH/Lua/world.lua \
+            CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
+            CorsixTH/Luatest/spec/world_spec.lua; do
+            expected=$(git rev-parse "$FINAL:$f")
+            actual=$(git hash-object "/tmp/verify/$f")
+            if [ "$expected" = "$actual" ]; then
+              echo "MATCH $f $actual"
+            else
+              echo "MISMATCH $f expected=$expected actual=$actual"
+              mismatch=1
+            fi
+          done
+          exit "$mismatch"
