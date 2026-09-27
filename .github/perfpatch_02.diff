@@ -1,0 +1,147 @@
+@@ -2070,11 +2171,10 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation,
+       if #ingress_tiles > 0 then
+         -- A newly placed Reception Desk is a protected endpoint in its own
+         -- right, even if the candidate does not otherwise split the corridor.
+-        for _, tile in ipairs(candidate_tiles) do
+-          if not self:isTileConnectedToBlockingOffAreaIngress(
+-              tile.x, tile.y, ingress_tiles) then
+-            return {unsafe = true}
+-          end
++        if #candidate_tiles > 0 and
++            not self:_areBlockingOffAreaTilesConnectedToIngress(
++              candidate_tiles, ingress_tiles) then
++          return {unsafe = true}
+         end
+ 
+         if options.check_existing and impact_baseline then
+@@ -2082,7 +2182,10 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation,
+             self:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
+           if ingress_broken then return {unsafe = true} end
+           if #blocked_areas > 0 then
+-            return {unsafe = false, blocked_areas = blocked_areas}
++            return {
++              unsafe = false,
++              blocked_tiles = self:_collectBlockingOffAreaTiles(blocked_areas),
++            }
+           end
+         end
+       end
+@@ -2102,19 +2205,19 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation,
+ 
+   if first_pass.unsafe then return true, has_normal_spawns end
+   if #ingress_tiles == 0 then return nil, has_normal_spawns end
+-  if not first_pass.blocked_areas then return false, has_normal_spawns end
+-
+-  -- Only an actually-created blocked component justifies the more expensive
+-  -- protected-endpoint scan. Capture baseline validity after removing an old
+-  -- moved object but before applying the candidate.
+-  local protected_unsafe = self:_withProspectiveCorridorObjectTopology(
+-    x, y, object, orientation, options.existing_object, function(endpoints)
+-      return self:_blockingOffAreasContainProtectedEndpoint(
+-        first_pass.blocked_areas, endpoints)
+-    end, function()
+-      return self:_captureBlockingOffAreaProtectedBaseline(ingress_tiles, {
+-        check_humanoids = true,
+-      })
++  if not first_pass.blocked_tiles then return false, has_normal_spawns end
++
++  -- Only protected endpoints whose logical tiles are actually in the newly
++  -- blocked component need pathfinding. For moves, baseline means old topology
++  -- removed and candidate not yet applied.
++  local protected_unsafe = self:_withCorridorObjectBaselineTopology(
++    options.existing_object, function()
++      local endpoints = self:_captureBlockingOffAreaProtectedBaseline(
++        ingress_tiles, {
++          check_humanoids = true,
++          affected_tiles = first_pass.blocked_tiles,
++        })
++      return self:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
+     end)
+ 
+   return protected_unsafe, has_normal_spawns
+diff --git a/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua b/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
+index b017110214e6b0f2190119b5323a6610ab149ecb..44cc73e8be4861d0e36efdd6b6a3b26afb161864 100644
+--- a/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
++++ b/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
+@@ -51,7 +51,7 @@ describe("special-map blocked-area UI connectivity", function()
+       return ingress_tiles, has_normal_spawns
+     end
+     function world:_captureBlockingOffAreaImpactBaseline()
+-      return {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
++      return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
+     end
+     function world:_getBlockingOffAreaImpact()
+       return false, protected_result and {} or {{x = 1, y = 1}}
+@@ -59,11 +59,14 @@ describe("special-map blocked-area UI connectivity", function()
+     function world:isTileConnectedToBlockingOffAreaIngress()
+       return protected_result
+     end
++    function world:_collectBlockingOffAreaTiles()
++      return {["1:1"] = true}
++    end
+     function world:_captureBlockingOffAreaProtectedBaseline()
+       calls.protected = calls.protected + 1
+       return {}
+     end
+-    function world:_blockingOffAreasContainProtectedEndpoint()
++    function world:_blockingOffAreaProtectedEndpointsUnsafe()
+       return not protected_result
+     end
+ 
+diff --git a/CorsixTH/Luatest/spec/world_spec.lua b/CorsixTH/Luatest/spec/world_spec.lua
+index ac0da3ee99d35a266bb487867d95ef2db022c232..97950631cdf45977599271ea2e2378bdb64191e9 100644
+--- a/CorsixTH/Luatest/spec/world_spec.lua
++++ b/CorsixTH/Luatest/spec/world_spec.lua
+@@ -840,7 +840,7 @@ describe("world.lua: ", function()
+       end
+       world._getCorridorCandidateProtectedTiles = function() return {} end
+       world._captureBlockingOffAreaImpactBaseline = function()
+-        return {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
++        return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
+       end
+       world._getBlockingOffAreaImpact = function()
+         return false, {}
+@@ -873,22 +873,26 @@ describe("world.lua: ", function()
+       end
+       world._getCorridorCandidateProtectedTiles = function() return {} end
+       world._captureBlockingOffAreaImpactBaseline = function()
+-        return {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
++        return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
+       end
+       world._getBlockingOffAreaImpact = function()
+         return false, {{x = 2, y = 1}}
+       end
++      world._collectBlockingOffAreaTiles = function(_, areas)
++        assert.are.equal(1, #areas)
++        return {["2:1"] = true}
++      end
+       world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, _, callback, before)
+         local baseline = before and before()
+         return callback(baseline)
+       end
+       local protected_calls = 0
+-      world._captureBlockingOffAreaProtectedBaseline = function()
++      world._captureBlockingOffAreaProtectedBaseline = function(_, _, options)
+         protected_calls = protected_calls + 1
++        assert.is_true(options.affected_tiles["2:1"])
+         return {{x = 2, y = 1, was_valid = true, description = "room door"}}
+       end
+-      world._blockingOffAreasContainProtectedEndpoint = function(_, areas, endpoints)
+-        assert.are.equal(1, #areas)
++      world._blockingOffAreaProtectedEndpointsUnsafe = function(_, endpoints)
+         assert.are.equal(1, #endpoints)
+         return true
+       end
+@@ -905,6 +909,195 @@ describe("world.lua: ", function()
+       assert.are.equal(1, protected_calls)
+     end)
+ 
++    it("checks multiple candidate tiles against the ingress network once", function()
++      local initial = {}
++      local ingress = {}
++      for x = 1, 16 do
++        initial[x .. ":1"] = {passable = true}
++        ingress[#ingress + 1] = {x = x, y = 1}
++      end
++      initial[17 .. ":1"] = {passable = true}
++      initial[18 .. ":1"] = {passable = true}
