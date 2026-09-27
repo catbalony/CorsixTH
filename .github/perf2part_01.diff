@@ -1,0 +1,144 @@
+ffAreaTiles(blocked_areas),
+-            }
++            blocked_tiles = self:_collectBlockingOffAreaTiles(blocked_areas)
+           end
+         end
++
++        -- A newly placed Reception Desk is a protected endpoint in its own
++        -- right. On final placement the impact pass has already verified the
++        -- ingress components, so each usage tile only needs one query per
++        -- pre-existing ingress component. Preview retains the standalone check.
++        if #candidate_tiles > 0 then
++          local connected
++          if options.check_existing and impact_baseline then
++            connected = self:_areBlockingOffAreaTilesConnectedToIngressComponents(
++              candidate_tiles, ingress_tiles, impact_baseline)
++          else
++            connected = self:_areBlockingOffAreaTilesConnectedToIngress(
++              candidate_tiles, ingress_tiles)
++          end
++          if not connected then return {unsafe = true} end
++        end
++
++        if blocked_tiles then
++          return {
++            unsafe = false,
++            blocked_tiles = blocked_tiles,
++            ingress_baseline = impact_baseline,
++          }
++        end
+       end
+ 
+       -- Without normal spawn points, retain the legacy strict rule. The strict
+@@ -2216,6 +2276,7 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation,
+         ingress_tiles, {
+           check_humanoids = true,
+           affected_tiles = first_pass.blocked_tiles,
++          ingress_baseline = first_pass.ingress_baseline,
+         })
+       return self:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
+     end)
+diff --git a/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua b/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
+index 44cc73e8..a6c696ea 100644
+--- a/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
++++ b/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
+@@ -59,6 +59,9 @@ describe("special-map blocked-area UI connectivity", function()
+     function world:isTileConnectedToBlockingOffAreaIngress()
+       return protected_result
+     end
++    function world:_areBlockingOffAreaTilesConnectedToIngressComponents()
++      return protected_result
++    end
+     function world:_collectBlockingOffAreaTiles()
+       return {["1:1"] = true}
+     end
+diff --git a/CorsixTH/Luatest/spec/world_spec.lua b/CorsixTH/Luatest/spec/world_spec.lua
+index 97950631..8699be4b 100644
+--- a/CorsixTH/Luatest/spec/world_spec.lua
++++ b/CorsixTH/Luatest/spec/world_spec.lua
+@@ -971,6 +971,85 @@ describe("world.lua: ", function()
+       assert.are.equal(15, calls)
+     end)
+ 
++    it("checks an affected endpoint once per baseline ingress component", function()
++      local initial = {
++        ["20:1"] = {passable = true},
++      }
++      local ingress = {}
++      local component = {}
++      for x = 1, 16 do
++        initial[x .. ":1"] = {passable = true}
++        ingress[#ingress + 1] = {x = x, y = 1}
++        component[#component + 1] = x
++      end
++      local map = makeFlagMap(initial)
++      local room = {
++        door = {tile_x = 20, tile_y = 1},
++        getEntranceXY = function() return 20, 1 end,
++      }
++      local world = makeWorld({})
++      world.map = {th = map}
++      world.rooms = {room}
++      world.isOnMap = function(_, x, y)
++        return 1 <= x and x <= 20 and y == 1
++      end
++      local calls = 0
++      world.pathfinder = {
++        findDistance = function()
++          calls = calls + 1
++          return 1
++        end,
++      }
++
++      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
++        ingress, {
++          affected_tiles = {["20:1"] = true},
++          ingress_baseline = {
++            ingress_components = {component},
++            all_ingress_usable = true,
++          },
++        })
++
++      assert.are.equal(1, #endpoints)
++      assert.is_true(endpoints[1].was_valid)
++      assert.are.equal(1, calls)
++    end)
++
++    it("marks affected endpoints invalid without pathfinding when an ingress is unusable", function()
++      local map = makeFlagMap({
++        ["1:1"] = {passable = true},
++        ["2:1"] = {passable = true},
++      })
++      local room = {
++        door = {tile_x = 2, tile_y = 1},
++        getEntranceXY = function() return 2, 1 end,
++      }
++      local world = makeWorld({})
++      world.map = {th = map}
++      world.rooms = {room}
++      world.isOnMap = function() return true end
++      local calls = 0
++      world.pathfinder = {
++        findDistance = function()
++          calls = calls + 1
++          return 1
++        end,
++      }
++
++      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
++        {{x = 1, y = 1}}, {
++          affected_tiles = {["2:1"] = true},
++          ingress_baseline = {
++            ingress_components = {{1}},
++            all_ingress_usable = false,
++          },
++        })
++
++      assert.are.equal(1, #endpoints)
++      assert.is_false(endpoints[1].was_valid)
++      assert.are.equal(0, calls)
++    end)
++
+     it("flood-fills only tiles in the newly blocked component", function()
+       local map = makeFlagMap({
+         ["1:1"] = {
