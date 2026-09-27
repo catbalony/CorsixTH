@@ -1,0 +1,157 @@
+diff --git a/CorsixTH/Lua/dialogs/edit_room.lua b/CorsixTH/Lua/dialogs/edit_room.lua
+index 428770ab71221f6383ddbf37ed846dd142f008d8..d03e9037a47e286b99e8c3891a271815ba145601 100644
+--- a/CorsixTH/Lua/dialogs/edit_room.lua
++++ b/CorsixTH/Lua/dialogs/edit_room.lua
+@@ -1081,23 +1081,24 @@ function UIEditRoom:_isProspectiveRoomNetworkValid(options)
+         local ingress_broken, blocked_areas =
+           world:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
+         if ingress_broken then return {unsafe = true} end
+-        return {unsafe = false, blocked_areas = blocked_areas}
++        local blocked_tiles
++        if #blocked_areas > 0 then
++          blocked_tiles = world:_collectBlockingOffAreaTiles(blocked_areas)
++        end
++        return {unsafe = false, blocked_tiles = blocked_tiles}
+       end
+       return {unsafe = false}
+     end)
+ 
+     protected_valid = not first_pass.unsafe
+-    if protected_valid and first_pass.blocked_areas and
+-        #first_pass.blocked_areas > 0 then
++    if protected_valid and first_pass.blocked_tiles then
+       local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
+         ingress_tiles, {
+           ignored_room = self.room,
+           check_humanoids = options.check_humanoids,
++          affected_tiles = first_pass.blocked_tiles,
+         })
+-      protected_valid = not self:_withProspectiveRoomTopology(function()
+-        return world:_blockingOffAreasContainProtectedEndpoint(
+-          first_pass.blocked_areas, endpoints)
+-      end)
++      protected_valid = not world:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
+     end
+   end
+ 
+diff --git a/CorsixTH/Lua/world.lua b/CorsixTH/Lua/world.lua
+index 7e00dca7a66a2eb3df20ca15e20bacd5d7e8a346..42611fff991098f10c0c3455b97c174360766a27 100644
+--- a/CorsixTH/Lua/world.lua
++++ b/CorsixTH/Lua/world.lua
+@@ -1711,11 +1711,34 @@ end
+ 
+ -- Capture only the local topology needed to decide whether a candidate has a
+ -- meaningful connectivity effect. No room, desk, or humanoid scan happens here.
++-- Ingress points are grouped into their pre-placement connected components so
++-- the normal (fully connected) case needs O(N) path queries rather than all
++-- O(N^2) ingress pairs.
+ function World:_captureBlockingOffAreaImpactBaseline(ingress_tiles, boundary_tiles)
+   local map = self.map.th
+-  local baseline = {tiles = {}, reaches_ingress = {}, ingress_pairs = {}}
++  local baseline = {tiles = {}, reaches_ingress = {}, ingress_components = {}}
+   local seen = {}
+ 
++  for i, ingress in ipairs(ingress_tiles or {}) do
++    if self:isOnMap(ingress.x, ingress.y) and
++        map:getCellFlags(ingress.x, ingress.y).passable then
++      local component
++      for _, candidate in ipairs(baseline.ingress_components) do
++        local representative = ingress_tiles[candidate[1]]
++        if self.pathfinder:findDistance(
++            ingress.x, ingress.y, representative.x, representative.y) then
++          component = candidate
++          break
++        end
++      end
++      if not component then
++        component = {}
++        baseline.ingress_components[#baseline.ingress_components + 1] = component
++      end
++      component[#component + 1] = i
++    end
++  end
++
+   for _, tile in ipairs(boundary_tiles or {}) do
+     local x, y = tile.x, tile.y
+     local key = x and y and blockingOffAreaTileKey(x, y)
+@@ -1724,10 +1747,9 @@ function World:_captureBlockingOffAreaImpactBaseline(ingress_tiles, boundary_til
+       seen[key] = true
+       baseline.tiles[#baseline.tiles + 1] = {x = x, y = y}
+       local reaches = false
+-      for _, ingress in ipairs(ingress_tiles or {}) do
+-        if self:isOnMap(ingress.x, ingress.y) and
+-            map:getCellFlags(ingress.x, ingress.y).passable and
+-            self.pathfinder:findDistance(x, y, ingress.x, ingress.y) then
++      for _, component in ipairs(baseline.ingress_components) do
++        local ingress = ingress_tiles[component[1]]
++        if self.pathfinder:findDistance(x, y, ingress.x, ingress.y) then
+           reaches = true
+           break
+         end
+@@ -1736,34 +1758,24 @@ function World:_captureBlockingOffAreaImpactBaseline(ingress_tiles, boundary_til
+     end
+   end
+ 
+-  -- Only remember ingress pairs which are connected before placement. A
+-  -- pre-existing broken spawn network must not poison an unrelated placement.
+-  for i = 1, #(ingress_tiles or {}) do
+-    local a = ingress_tiles[i]
+-    if self:isOnMap(a.x, a.y) and map:getCellFlags(a.x, a.y).passable then
+-      for j = i + 1, #ingress_tiles do
+-        local b = ingress_tiles[j]
+-        if self:isOnMap(b.x, b.y) and map:getCellFlags(b.x, b.y).passable and
+-            self.pathfinder:findDistance(a.x, a.y, b.x, b.y) then
+-          baseline.ingress_pairs[#baseline.ingress_pairs + 1] = {i, j}
+-        end
+-      end
+-    end
+-  end
+-
+   return baseline
+ end
+ 
+--- With the candidate topology active, report whether it broke a previously
+--- connected ingress pair and which newly-created local components can no
+--- longer reach any ingress. Existing blocked components are ignored.
++-- With the candidate topology active, report whether it split an ingress
++-- component which was connected before placement and which newly-created local
++-- components can no longer reach any ingress. Existing split ingress networks
++-- and existing blocked components are ignored.
+ function World:_getBlockingOffAreaImpact(ingress_tiles, baseline)
+   local map = self.map.th
+ 
+-  for _, pair in ipairs(baseline.ingress_pairs or {}) do
+-    local a, b = ingress_tiles[pair[1]], ingress_tiles[pair[2]]
+-    if not self.pathfinder:findDistance(a.x, a.y, b.x, b.y) then
+-      return true, {}
++  for _, component in ipairs(baseline.ingress_components or {}) do
++    local representative = ingress_tiles[component[1]]
++    for i = 2, #component do
++      local ingress = ingress_tiles[component[i]]
++      if not self.pathfinder:findDistance(
++          representative.x, representative.y, ingress.x, ingress.y) then
++        return true, {}
++      end
+     end
+   end
+ 
+@@ -1789,11 +1801,10 @@ function World:_getBlockingOffAreaImpact(ingress_tiles, baseline)
+   local blocked_areas = {}
+   for _, component in ipairs(components) do
+     local reaches_ingress = false
+-    for _, ingress in ipairs(ingress_tiles or {}) do
+-      if self:isOnMap(ingress.x, ingress.y) and
+-          map:getCellFlags(ingress.x, ingress.y).passable and
+-          self.pathfinder:findDistance(
+-            component.rep.x, component.rep.y, ingress.x, ingress.y) then
++    for _, ingress_component in ipairs(baseline.ingress_components or {}) do
++      local ingress = ingress_tiles[ingress_component[1]]
++      if self.pathfinder:findDistance(
++          component.rep.x, component.rep.y, ingress.x, ingress.y) then
+         reaches_ingress = true
+         break
+       end
+@@ -1816,39 +1827,85 @@ function World:_getBlockingOffAreaImpact(ingress_tiles, baseline)
+   return false, blocked_areas
+ end
+ 
