@@ -118,10 +118,10 @@ jobs:
 
           unzip -t "$ZIP"
 
-          rm -rf verify
-          mkdir verify
-          git archive "$BASE" | tar -x -C verify
-          (cd verify && git apply --check "../$OUT/FINAL_PATCH.diff" && git apply "../$OUT/FINAL_PATCH.diff")
+          rm -rf /tmp/issue826-verify
+          mkdir /tmp/issue826-verify
+          git archive "$BASE" | tar -x -C /tmp/issue826-verify
+          (cd /tmp/issue826-verify && git apply --check "$GITHUB_WORKSPACE/$OUT/FINAL_PATCH.diff" && git apply "$GITHUB_WORKSPACE/$OUT/FINAL_PATCH.diff")
 
           for f in \
             CorsixTH/Lua/dialogs/edit_room.lua \
@@ -131,7 +131,7 @@ jobs:
             CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
             CorsixTH/Luatest/spec/world_spec.lua; do
             expected=$(git rev-parse "$FINAL:$f")
-            actual=$(git hash-object "verify/$f")
+            actual=$(git hash-object "/tmp/issue826-verify/$f")
             test "$expected" = "$actual"
           done
 
