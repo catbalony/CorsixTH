@@ -971,6 +971,85 @@ describe("world.lua: ", function()
       assert.are.equal(15, calls)
     end)
 
+    it("checks an affected endpoint once per baseline ingress component", function()
+      local initial = {
+        ["20:1"] = {passable = true},
+      }
+      local ingress = {}
+      local component = {}
+      for x = 1, 16 do
+        initial[x .. ":1"] = {passable = true}
+        ingress[#ingress + 1] = {x = x, y = 1}
+        component[#component + 1] = x
+      end
+      local map = makeFlagMap(initial)
+      local room = {
+        door = {tile_x = 20, tile_y = 1},
+        getEntranceXY = function() return 20, 1 end,
+      }
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.rooms = {room}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 20 and y == 1
+      end
+      local calls = 0
+      world.pathfinder = {
+        findDistance = function()
+          calls = calls + 1
+          return 1
+        end,
+      }
+
+      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
+        ingress, {
+          affected_tiles = {["20:1"] = true},
+          ingress_baseline = {
+            ingress_components = {component},
+            all_ingress_usable = true,
+          },
+        })
+
+      assert.are.equal(1, #endpoints)
+      assert.is_true(endpoints[1].was_valid)
+      assert.are.equal(1, calls)
+    end)
+
+    it("marks affected endpoints invalid without pathfinding when an ingress is unusable", function()
+      local map = makeFlagMap({
+        ["1:1"] = {passable = true},
+        ["2:1"] = {passable = true},
+      })
+      local room = {
+        door = {tile_x = 2, tile_y = 1},
+        getEntranceXY = function() return 2, 1 end,
+      }
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.rooms = {room}
+      world.isOnMap = function() return true end
+      local calls = 0
+      world.pathfinder = {
+        findDistance = function()
+          calls = calls + 1
+          return 1
+        end,
+      }
+
+      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
+        {{x = 1, y = 1}}, {
+          affected_tiles = {["2:1"] = true},
+          ingress_baseline = {
+            ingress_components = {{1}},
+            all_ingress_usable = false,
+          },
+        })
+
+      assert.are.equal(1, #endpoints)
+      assert.is_false(endpoints[1].was_valid)
+      assert.are.equal(0, calls)
+    end)
+
     it("flood-fills only tiles in the newly blocked component", function()
       local map = makeFlagMap({
         ["1:1"] = {

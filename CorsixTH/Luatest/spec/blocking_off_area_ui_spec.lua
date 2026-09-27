@@ -59,6 +59,9 @@ describe("special-map blocked-area UI connectivity", function()
     function world:isTileConnectedToBlockingOffAreaIngress()
       return protected_result
     end
+    function world:_areBlockingOffAreaTilesConnectedToIngressComponents()
+      return protected_result
+    end
     function world:_collectBlockingOffAreaTiles()
       return {["1:1"] = true}
     end

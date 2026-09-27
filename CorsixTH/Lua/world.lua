@@ -1716,12 +1716,19 @@ end
 -- O(N^2) ingress pairs.
 function World:_captureBlockingOffAreaImpactBaseline(ingress_tiles, boundary_tiles)
   local map = self.map.th
-  local baseline = {tiles = {}, reaches_ingress = {}, ingress_components = {}}
+  local baseline = {
+    tiles = {},
+    reaches_ingress = {},
+    ingress_components = {},
+    all_ingress_usable = true,
+  }
   local seen = {}
 
   for i, ingress in ipairs(ingress_tiles or {}) do
-    if self:isOnMap(ingress.x, ingress.y) and
-        map:getCellFlags(ingress.x, ingress.y).passable then
+    if not self:isOnMap(ingress.x, ingress.y) or
+        not map:getCellFlags(ingress.x, ingress.y).passable then
+      baseline.all_ingress_usable = false
+    else
       local component
       for _, candidate in ipairs(baseline.ingress_components) do
         local representative = ingress_tiles[candidate[1]]
@@ -1869,6 +1876,40 @@ function World:_collectBlockingOffAreaTiles(blocked_areas)
   return blocked_tiles
 end
 
+-- Check one endpoint against one representative of each ingress component.
+-- Because every ingress within a component was connected in the baseline, this
+-- is equivalent to checking every ingress but normally needs just one path query.
+function World:_isBlockingOffAreaEndpointConnectedToIngressComponents(
+    x, y, ingress_tiles, ingress_baseline, humanoid)
+  if not ingress_baseline or ingress_baseline.all_ingress_usable == false or
+      not ingress_baseline.ingress_components or
+      #ingress_baseline.ingress_components == 0 or not self:isOnMap(x, y) then
+    return false
+  end
+  if not humanoid and not self.map.th:getCellFlags(x, y).passable then
+    return false
+  end
+
+  for _, component in ipairs(ingress_baseline.ingress_components) do
+    local ingress = ingress_tiles[component[1]]
+    if not self.pathfinder:findDistance(x, y, ingress.x, ingress.y) then
+      return false
+    end
+  end
+  return true
+end
+
+function World:_areBlockingOffAreaTilesConnectedToIngressComponents(
+    tiles, ingress_tiles, ingress_baseline)
+  for _, tile in ipairs(tiles or {}) do
+    if not self:_isBlockingOffAreaEndpointConnectedToIngressComponents(
+        tile.x, tile.y, ingress_tiles, ingress_baseline, false) then
+      return false
+    end
+  end
+  return true
+end
+
 -- Capture baseline validity only for protected endpoints which lie in a newly
 -- created blocked component. Scanning entity/room tables is cheap; pathfinding
 -- is deliberately restricted to the usually tiny affected subset.
@@ -1881,7 +1922,12 @@ function World:_captureBlockingOffAreaProtectedBaseline(ingress_tiles, options)
   for _, endpoint in ipairs(endpoints) do
     if not affected_tiles or affected_tiles[blockingOffAreaTileKey(
         endpoint.x, endpoint.y)] then
-      if endpoint.humanoid then
+      if options.ingress_baseline then
+        endpoint.was_valid =
+          self:_isBlockingOffAreaEndpointConnectedToIngressComponents(
+            endpoint.x, endpoint.y, ingress_tiles, options.ingress_baseline,
+            endpoint.humanoid)
+      elseif endpoint.humanoid then
         endpoint.was_valid = self:isHumanoidConnectedToBlockingOffAreaIngress(
           endpoint.x, endpoint.y, ingress_tiles)
       else
@@ -2169,24 +2215,38 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation, 
   local first_pass = self:_withProspectiveCorridorObjectTopology(
     x, y, object, orientation, options.existing_object, function(impact_baseline)
       if #ingress_tiles > 0 then
-        -- A newly placed Reception Desk is a protected endpoint in its own
-        -- right, even if the candidate does not otherwise split the corridor.
-        if #candidate_tiles > 0 and
-            not self:_areBlockingOffAreaTilesConnectedToIngress(
-              candidate_tiles, ingress_tiles) then
-          return {unsafe = true}
-        end
-
+        local blocked_tiles
         if options.check_existing and impact_baseline then
           local ingress_broken, blocked_areas =
             self:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
           if ingress_broken then return {unsafe = true} end
           if #blocked_areas > 0 then
-            return {
-              unsafe = false,
-              blocked_tiles = self:_collectBlockingOffAreaTiles(blocked_areas),
-            }
+            blocked_tiles = self:_collectBlockingOffAreaTiles(blocked_areas)
           end
+        end
+
+        -- A newly placed Reception Desk is a protected endpoint in its own
+        -- right. On final placement the impact pass has already verified the
+        -- ingress components, so each usage tile only needs one query per
+        -- pre-existing ingress component. Preview retains the standalone check.
+        if #candidate_tiles > 0 then
+          local connected
+          if options.check_existing and impact_baseline then
+            connected = self:_areBlockingOffAreaTilesConnectedToIngressComponents(
+              candidate_tiles, ingress_tiles, impact_baseline)
+          else
+            connected = self:_areBlockingOffAreaTilesConnectedToIngress(
+              candidate_tiles, ingress_tiles)
+          end
+          if not connected then return {unsafe = true} end
+        end
+
+        if blocked_tiles then
+          return {
+            unsafe = false,
+            blocked_tiles = blocked_tiles,
+            ingress_baseline = impact_baseline,
+          }
         end
       end
 
@@ -2216,6 +2276,7 @@ function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation, 
         ingress_tiles, {
           check_humanoids = true,
           affected_tiles = first_pass.blocked_tiles,
+          ingress_baseline = first_pass.ingress_baseline,
         })
       return self:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
     end)

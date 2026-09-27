@@ -1072,22 +1072,29 @@ function UIEditRoom:_isProspectiveRoomNetworkValid(options)
       ingress_tiles, boundary_tiles)
 
     local first_pass = self:_withProspectiveRoomTopology(function()
-      if door_tile and not world:isTileConnectedToBlockingOffAreaIngress(
-          door_tile.x, door_tile.y, ingress_tiles) then
-        return {unsafe = true}
-      end
-
+      local blocked_tiles
       if options.check_humanoids then
         local ingress_broken, blocked_areas =
           world:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
         if ingress_broken then return {unsafe = true} end
-        local blocked_tiles
         if #blocked_areas > 0 then
           blocked_tiles = world:_collectBlockingOffAreaTiles(blocked_areas)
         end
-        return {unsafe = false, blocked_tiles = blocked_tiles}
       end
-      return {unsafe = false}
+
+      if door_tile then
+        local connected
+        if options.check_humanoids then
+          connected = world:_areBlockingOffAreaTilesConnectedToIngressComponents(
+            {door_tile}, ingress_tiles, impact_baseline)
+        else
+          connected = world:isTileConnectedToBlockingOffAreaIngress(
+            door_tile.x, door_tile.y, ingress_tiles)
+        end
+        if not connected then return {unsafe = true} end
+      end
+
+      return {unsafe = false, blocked_tiles = blocked_tiles}
     end)
 
     protected_valid = not first_pass.unsafe
@@ -1097,6 +1104,7 @@ function UIEditRoom:_isProspectiveRoomNetworkValid(options)
           ignored_room = self.room,
           check_humanoids = options.check_humanoids,
           affected_tiles = first_pass.blocked_tiles,
+          ingress_baseline = impact_baseline,
         })
       protected_valid = not world:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
     end
