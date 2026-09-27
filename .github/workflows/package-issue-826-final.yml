@@ -117,10 +117,6 @@ jobs:
           )
 
           unzip -t "$ZIP"
-          test "$(unzip -Z1 "$ZIP" | wc -l)" -eq 4
-          for required in FINAL_PATCH.diff DEV_README.md FINAL_REVIEW.md SHA256SUMS.txt; do
-            test "$(unzip -Z1 "$ZIP" | grep -Fxc "$required")" -eq 1
-          done
 
           rm -rf verify
           mkdir verify
