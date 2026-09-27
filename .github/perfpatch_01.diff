@@ -1,0 +1,164 @@
+--- Capture validity only after the cheap topology-impact test has found a new
+--- blocked component. This keeps the common placement path free of global
+--- room/desk/humanoid pathfinding work.
++local blocking_off_area_directions = {
++  {x = -1, y =  0, flag = "travelWest"},
++  {x =  1, y =  0, flag = "travelEast"},
++  {x =  0, y = -1, flag = "travelNorth"},
++  {x =  0, y =  1, flag = "travelSouth"},
++}
++
++-- Flood-fill only newly-created blocked components while the prospective
++-- topology is active. The returned hash makes all later protected-endpoint
++-- checks simple O(1) tile membership tests rather than pathfinder searches.
++function World:_collectBlockingOffAreaTiles(blocked_areas)
++  local map = self.map.th
++  local blocked_tiles = {}
++  local queue = {}
++  local next_index = 1
++
++  local function addTile(x, y)
++    if not self:isOnMap(x, y) or not map:getCellFlags(x, y).passable then return end
++    local key = blockingOffAreaTileKey(x, y)
++    if blocked_tiles[key] then return end
++    blocked_tiles[key] = true
++    queue[#queue + 1] = {x = x, y = y}
++  end
++
++  for _, area in ipairs(blocked_areas or {}) do
++    addTile(area.x, area.y)
++  end
++
++  while next_index <= #queue do
++    local tile = queue[next_index]
++    next_index = next_index + 1
++    local flags = map:getCellFlags(tile.x, tile.y)
++    for _, direction in ipairs(blocking_off_area_directions) do
++      if flags[direction.flag] then
++        addTile(tile.x + direction.x, tile.y + direction.y)
++      end
++    end
++  end
++
++  return blocked_tiles
++end
++
++-- Capture baseline validity only for protected endpoints which lie in a newly
++-- created blocked component. Scanning entity/room tables is cheap; pathfinding
++-- is deliberately restricted to the usually tiny affected subset.
+ function World:_captureBlockingOffAreaProtectedBaseline(ingress_tiles, options)
++  options = options or {}
+   local endpoints = self:_collectBlockingOffAreaProtectedEndpoints(options)
++  local affected = {}
++  local affected_tiles = options.affected_tiles
++
+   for _, endpoint in ipairs(endpoints) do
+-    endpoint.was_valid = self:isTileConnectedToBlockingOffAreaIngress(
+-      endpoint.x, endpoint.y, ingress_tiles)
+-    if endpoint.humanoid then
+-      endpoint.was_valid = self:isHumanoidConnectedToBlockingOffAreaIngress(
+-        endpoint.x, endpoint.y, ingress_tiles)
++    if not affected_tiles or affected_tiles[blockingOffAreaTileKey(
++        endpoint.x, endpoint.y)] then
++      if endpoint.humanoid then
++        endpoint.was_valid = self:isHumanoidConnectedToBlockingOffAreaIngress(
++          endpoint.x, endpoint.y, ingress_tiles)
++      else
++        endpoint.was_valid = self:isTileConnectedToBlockingOffAreaIngress(
++          endpoint.x, endpoint.y, ingress_tiles)
++      end
++      affected[#affected + 1] = endpoint
+     end
+   end
+-  return endpoints
++  return affected
+ end
+ 
+--- Check only endpoints which are actually inside a newly-created blocked
+--- component. A pre-existing invalid endpoint is not blamed on this placement,
+--- but is written to the game log for diagnostics.
+-function World:_blockingOffAreasContainProtectedEndpoint(blocked_areas, endpoints)
++-- Affected endpoints are known to be inside a component which the candidate
++-- has disconnected. Only their pre-candidate validity matters now; no further
++-- pathfinding is required under candidate topology.
++function World:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
+   for _, endpoint in ipairs(endpoints or {}) do
+-    for _, area in ipairs(blocked_areas or {}) do
+-      if self.pathfinder:findDistance(endpoint.x, endpoint.y, area.x, area.y) then
+-        if endpoint.was_valid then
+-          return true
+-        end
+-        local suffix = endpoint.action and " (action: " .. endpoint.action .. ")" or ""
+-        self:gameLog(("Warning: Ignoring pre-existing path-invalid %s at (%d, %d) " ..
+-            "during blocking-off-area placement check%s.")
+-          :format(endpoint.description, endpoint.x, endpoint.y, suffix))
+-        break
+-      end
++    if endpoint.was_valid then
++      return true
+     end
++    local suffix = endpoint.action and " (action: " .. endpoint.action .. ")" or ""
++    self:gameLog(("Warning: Ignoring pre-existing path-invalid %s at (%d, %d) " ..
++        "during blocking-off-area placement check%s.")
++      :format(endpoint.description, endpoint.x, endpoint.y, suffix))
+   end
+   return false
+ end
+@@ -1986,6 +2043,16 @@ function World:_withProspectiveCorridorObjectTopology(x, y, object, orientation,
+   end)
+ end
+ 
++-- Evaluate baseline state for a moved object with the old object's topology
++-- removed, but without applying the new candidate.
++function World:_withCorridorObjectBaselineTopology(existing_object, callback)
++  if not existing_object then return callback() end
++  return withRestoredPathfindingFlags(self, function(set_flag)
++    self:_removeExistingCorridorObjectTopology(existing_object, set_flag)
++    return callback()
++  end)
++end
++
+ function World:_getCorridorCandidateBoundaryTiles(x, y, object, orientation)
+   local layout = object.orientations[orientation]
+   local boundary = {}
+@@ -2053,6 +2120,40 @@ function World:_getCorridorCandidateProtectedTiles(x, y, object, orientation)
+   return protected_tiles
+ end
+ 
++-- Check several passable endpoint tiles against the same ingress network. The
++-- ingress network itself is tested once; each endpoint then needs just one
++-- path query to the representative ingress. This is especially useful for the
++-- Reception Desk, which has two usage positions checked during placement preview.
++function World:_areBlockingOffAreaTilesConnectedToIngress(tiles, ingress_tiles)
++  if not ingress_tiles or #ingress_tiles == 0 then return false end
++  local map = self.map.th
++  local representative = ingress_tiles[1]
++  if not self:isOnMap(representative.x, representative.y) or
++      not map:getCellFlags(representative.x, representative.y).passable then
++    return false
++  end
++
++  for i = 2, #ingress_tiles do
++    local ingress = ingress_tiles[i]
++    if not self:isOnMap(ingress.x, ingress.y) or
++        not map:getCellFlags(ingress.x, ingress.y).passable or
++        not self.pathfinder:findDistance(
++          representative.x, representative.y, ingress.x, ingress.y) then
++      return false
++    end
++  end
++
++  for _, tile in ipairs(tiles or {}) do
++    if not tile.x or not tile.y or not self:isOnMap(tile.x, tile.y) or
++        not map:getCellFlags(tile.x, tile.y).passable or
++        not self.pathfinder:findDistance(
++          tile.x, tile.y, representative.x, representative.y) then
++      return false
++    end
++  end
++  return true
++end
++
+ --! Test a prospective corridor object topology. Ordinary placements first run
+ --! a cheap local topology-impact check; existing doors, Reception Desks and
+ --! humanoids are examined only if the candidate actually creates a new blocked
