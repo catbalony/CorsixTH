@@ -33,6 +33,7 @@ jobs:
             CorsixTH/Lua/dialogs/place_objects.lua \
             CorsixTH/Lua/dialogs/place_staff.lua \
             CorsixTH/Lua/dialogs/edit_room.lua \
+            CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
             CorsixTH/Luatest/spec/world_spec.lua; do
             mkdir -p "/tmp/issue826-final/$(dirname "$path")"
             git show "$FINAL:$path" > "/tmp/issue826-final/$path"
@@ -92,7 +93,14 @@ jobs:
           git diff --cached --check
           git commit -m "Apply #826 checks to room placement"
 
-          # 5. Add rollback and placement regression coverage first.
+          # 5. Keep special-map / zero-ingress UI behavior independently reviewable.
+          cp /tmp/issue826-final/CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
+            CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
+          git add CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
+          git diff --cached --check
+          git commit -m "Test #826 special-map UI behavior"
+
+          # 6. Add rollback and basic placement regression coverage.
           python3 - <<'PY'
           from pathlib import Path
           path = Path('CorsixTH/Luatest/spec/world_spec.lua')
@@ -112,7 +120,7 @@ jobs:
           git diff --cached --check
           git commit -m "Test #826 placement and rollback behavior"
 
-          # 6. Add affected-area, performance and transient-state regressions.
+          # 7. Add affected-area, performance and transient-state regressions.
           cp /tmp/issue826-final/CorsixTH/Luatest/spec/world_spec.lua CorsixTH/Luatest/spec/world_spec.lua
           git add CorsixTH/Luatest/spec/world_spec.lua
           git diff --cached --check
@@ -132,9 +140,11 @@ jobs:
             02_prospective_corridor_topology.diff
             03_corridor_placement_integration.diff
             04_room_placement_integration.diff
-            05_placement_and_rollback_tests.diff
-            06_affected_area_and_performance_tests.diff
+            05_special_map_ui_tests.diff
+            06_placement_and_rollback_tests.diff
+            07_affected_area_and_performance_tests.diff
           )
+          test "${#commits[@]}" -eq "${#names[@]}"
           for i in "${!commits[@]}"; do
             git diff "${commits[$i]}^" "${commits[$i]}" --binary > "/tmp/issue826-handoff/diffs/${names[$i]}"
           done
@@ -146,7 +156,7 @@ jobs:
             echo "Final reference tree: \`$FINAL\`"
             echo "Split branch: \`$BRANCH\`"
             echo
-            echo 'The six commits are intended to be reviewed in order:'
+            echo 'The seven commits are intended to be reviewed in order:'
             echo
             for i in "${!commits[@]}"; do
               subject=$(git show -s --format=%s "${commits[$i]}")
