@@ -1508,6 +1508,57 @@ local allow_blocking_off_humanoids = false
 
 local reception_usage_positions = {"use_position", "use_position_secondary"}
 
+-- Run a callback while recording pathfinding flag changes. Every changed flag
+-- is restored to its original value, in reverse order, even if the callback
+-- raises an error.
+local function withRestoredPathfindingFlags(world, callback)
+  local map = world.map.th
+  local changed_flags = {}
+  local changed_order = {}
+
+  local function setFlag(x, y, flag, value)
+    if not world:isOnMap(x, y) then
+      error("prospective topology attempted to modify a tile outside the map")
+    end
+
+    local key = x .. ":" .. y .. ":" .. flag
+    if not changed_flags[key] then
+      changed_flags[key] = {
+        x = x,
+        y = y,
+        flag = flag,
+        value = map:getCellFlags(x, y)[flag],
+      }
+      changed_order[#changed_order + 1] = key
+    end
+
+    local flags = {}
+    flags[flag] = value
+    map:setCellFlags(x, y, flags)
+  end
+
+  local ok, result = pcall(callback, setFlag)
+
+  for i = #changed_order, 1, -1 do
+    local saved = changed_flags[changed_order[i]]
+    local flags = {}
+    flags[saved.flag] = saved.value
+    map:setCellFlags(saved.x, saved.y, flags)
+  end
+
+  if not ok then error(result) end
+  return result
+end
+
+local function getSideObjectParameters(object_type, orientation)
+  local direction = orientation
+  -- The bin has a legacy east/west orientation exception in Object placement.
+  if object_type.thob == 50 and direction == "east" then
+    direction = "west"
+  end
+  return Object.directionParameters()[direction]
+end
+
 --! Return the ingress tiles which corridor safety must preserve.
 --! Stored spawn points are runtime state and must never be recalculated by
 --! these checks. The heliport spawn is an additional, separate ingress tile.
@@ -1857,6 +1908,346 @@ function World:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
       :format(endpoint.description, endpoint.x, endpoint.y, suffix))
   end
   return false
+end
+
+-- Return the directional passability that removing one SideObject would leave.
+-- Real removal rebuilds walls/bounds and then reapplies every remaining
+-- SideObject; reproduce that result without invoking either global rebuild.
+function World:_isSideObjectEdgePassableWithoutObject(tile_x, tile_y, parameters,
+    excluded_object)
+  local map = self.map.th
+  local next_x = tile_x + parameters.x
+  local next_y = tile_y + parameters.y
+  if not self:isOnMap(next_x, next_y) then return false end
+
+  -- Native level_map::update_pathfinding() derives directional blocking from
+  -- north/west wall layers. South/east edges use the neighbour's north/west
+  -- layer respectively. Transparency/high bits are unrelated to blocking.
+  local wall_x, wall_y, wall_layer
+  if parameters.passable_flag == "travelNorth" then
+    wall_x, wall_y, wall_layer = tile_x, tile_y, 2
+  elseif parameters.passable_flag == "travelSouth" then
+    wall_x, wall_y, wall_layer = tile_x, tile_y + 1, 2
+  elseif parameters.passable_flag == "travelEast" then
+    wall_x, wall_y, wall_layer = tile_x + 1, tile_y, 3
+  else -- travelWest
+    wall_x, wall_y, wall_layer = tile_x, tile_y, 3
+  end
+  if map:getCell(wall_x, wall_y, wall_layer) % 0x100 ~= 0 then
+    return false
+  end
+
+  local function coversSameEdge(other_x, other_y, other_parameters)
+    local other_next_x = other_x + other_parameters.x
+    local other_next_y = other_y + other_parameters.y
+    return (other_x == tile_x and other_y == tile_y and
+        other_next_x == next_x and other_next_y == next_y) or
+      (other_x == next_x and other_y == next_y and
+        other_next_x == tile_x and other_next_y == tile_y)
+  end
+
+  -- Two SideObjects can cover the same edge, including from opposite tiles.
+  -- Removal must leave the edge blocked if any remaining SideObject covers it.
+  for _, objects in pairs(self.objects) do
+    for _, other in ipairs(objects) do
+      if other ~= excluded_object and other.tile_x and other.tile_y and
+          other.object_type.class == "SideObject" then
+        local other_parameters = getSideObjectParameters(
+          other.object_type, other.direction)
+        local other_layout = other.object_type.orientations[other.direction]
+        for _, other_tile in ipairs(other_layout.footprint) do
+          if other_tile.only_side and coversSameEdge(
+              other.tile_x + other_tile[1], other.tile_y + other_tile[2],
+              other_parameters) then
+            return false
+          end
+        end
+      end
+    end
+  end
+
+  return true
+end
+
+-- Remove the picked-up object's pathfinding footprint from prospective state.
+function World:_removeExistingCorridorObjectTopology(existing_object, set_flag)
+  if not existing_object or not existing_object.picked_up or
+      existing_object.th:isVisible() then
+    return
+  end
+
+  local object_type = existing_object.object_type
+  local layout = object_type.orientations[existing_object.direction]
+  if object_type.class == "SideObject" then
+    if not existing_object.set_passable_flags then return end
+
+    local parameters = getSideObjectParameters(object_type, existing_object.direction)
+    for _, tile in ipairs(layout.footprint) do
+      if tile.only_side then
+        local tile_x = existing_object.tile_x + tile[1]
+        local tile_y = existing_object.tile_y + tile[2]
+        local passable = self:_isSideObjectEdgePassableWithoutObject(
+          tile_x, tile_y, parameters, existing_object)
+        set_flag(tile_x, tile_y, parameters.passable_flag, passable)
+        set_flag(tile_x + parameters.x, tile_y + parameters.y,
+          Object.getComplementaryPassableFlag(parameters.passable_flag), passable)
+      end
+    end
+    return
+  end
+
+  for _, tile in ipairs(layout.footprint) do
+    if not tile.only_passable and not tile.only_side then
+      set_flag(existing_object.tile_x + tile[1], existing_object.tile_y + tile[2],
+        "passable", true)
+    end
+  end
+end
+
+-- Apply the candidate object's pathfinding footprint to prospective state.
+function World:_addCorridorObjectTopology(x, y, object, orientation, set_flag)
+  local map = self.map.th
+  local layout = object.orientations[orientation]
+  if object.class == "SideObject" then
+    local parameters = getSideObjectParameters(object, orientation)
+    for _, tile in ipairs(layout.footprint) do
+      if tile.only_side then
+        local tile_x, tile_y = x + tile[1], y + tile[2]
+        -- Object placement only owns these flags when the edge was passable.
+        if map:getCellFlags(tile_x, tile_y)[parameters.passable_flag] == true then
+          set_flag(tile_x, tile_y, parameters.passable_flag, false)
+          set_flag(tile_x + parameters.x, tile_y + parameters.y,
+            Object.getComplementaryPassableFlag(parameters.passable_flag), false)
+        end
+      end
+    end
+    return
+  end
+
+  for _, tile in ipairs(layout.footprint) do
+    if not tile.only_passable and not tile.only_side then
+      set_flag(x + tile[1], y + tile[2], "passable", false)
+    end
+  end
+end
+
+-- Evaluate a candidate as "remove the picked-up object, then add the candidate"
+-- while restoring every touched pathfinding flag afterwards.
+function World:_withProspectiveCorridorObjectTopology(x, y, object, orientation,
+    existing_object, callback, before_candidate)
+  return withRestoredPathfindingFlags(self, function(set_flag)
+    self:_removeExistingCorridorObjectTopology(existing_object, set_flag)
+    local baseline = before_candidate and before_candidate()
+    self:_addCorridorObjectTopology(x, y, object, orientation, set_flag)
+    return callback(baseline)
+  end)
+end
+
+-- Evaluate baseline state for a moved object with the old object's topology
+-- removed, but without applying the new candidate.
+function World:_withCorridorObjectBaselineTopology(existing_object, callback)
+  if not existing_object then return callback() end
+  return withRestoredPathfindingFlags(self, function(set_flag)
+    self:_removeExistingCorridorObjectTopology(existing_object, set_flag)
+    return callback()
+  end)
+end
+
+function World:_getCorridorCandidateBoundaryTiles(x, y, object, orientation)
+  local layout = object.orientations[orientation]
+  local boundary = {}
+
+  if object.class == "SideObject" then
+    local parameters = getSideObjectParameters(object, orientation)
+    for _, tile in ipairs(layout.footprint) do
+      if tile.only_side then
+        local tile_x, tile_y = x + tile[1], y + tile[2]
+        boundary[#boundary + 1] = {x = tile_x, y = tile_y}
+        boundary[#boundary + 1] = {
+          x = tile_x + parameters.x,
+          y = tile_y + parameters.y,
+        }
+      end
+    end
+    return boundary
+  end
+
+  local adjacent = layout.adjacent_to_solid_footprint
+  if adjacent then
+    for _, tile in ipairs(adjacent) do
+      boundary[#boundary + 1] = {x = x + tile[1], y = y + tile[2]}
+    end
+    return boundary
+  end
+
+  -- Small test/object definitions may not have Object's derived adjacency data.
+  -- Derive the same four-neighbour boundary directly from the solid footprint.
+  local solid, seen = {}, {}
+  for _, tile in ipairs(layout.footprint) do
+    if not tile.only_passable and not tile.only_side then
+      solid[blockingOffAreaTileKey(tile[1], tile[2])] = true
+    end
+  end
+  for _, tile in ipairs(layout.footprint) do
+    if not tile.only_passable and not tile.only_side then
+      for _, delta in ipairs({{-1, 0}, {1, 0}, {0, -1}, {0, 1}}) do
+        local dx, dy = tile[1] + delta[1], tile[2] + delta[2]
+        local key = blockingOffAreaTileKey(dx, dy)
+        if not solid[key] and not seen[key] then
+          seen[key] = true
+          boundary[#boundary + 1] = {x = x + dx, y = y + dy}
+        end
+      end
+    end
+  end
+  return boundary
+end
+
+-- Check several passable endpoint tiles against the same ingress network. The
+-- ingress network itself is tested once; each endpoint then needs just one
+-- path query to the representative ingress. This is especially useful for the
+-- Reception Desk, which has two usage positions checked during placement preview.
+function World:_areBlockingOffAreaTilesConnectedToIngress(
+    tiles, ingress_tiles, ingress_baseline)
+  if ingress_baseline then
+    for _, tile in ipairs(tiles or {}) do
+      if not self:_isBlockingOffAreaEndpointConnected(
+          tile.x, tile.y, ingress_tiles, ingress_baseline, false) then
+        return false
+      end
+    end
+    return true
+  end
+
+  if not ingress_tiles or #ingress_tiles == 0 then return false end
+  local map = self.map.th
+  local representative = ingress_tiles[1]
+  if not self:isOnMap(representative.x, representative.y) or
+      not map:getCellFlags(representative.x, representative.y).passable then
+    return false
+  end
+
+  for i = 2, #ingress_tiles do
+    local ingress = ingress_tiles[i]
+    if not self:isOnMap(ingress.x, ingress.y) or
+        not map:getCellFlags(ingress.x, ingress.y).passable or
+        not self.pathfinder:findDistance(
+          representative.x, representative.y, ingress.x, ingress.y) then
+      return false
+    end
+  end
+
+  for _, tile in ipairs(tiles or {}) do
+    if not tile.x or not tile.y or not self:isOnMap(tile.x, tile.y) or
+        not map:getCellFlags(tile.x, tile.y).passable or
+        not self.pathfinder:findDistance(
+          tile.x, tile.y, representative.x, representative.y) then
+      return false
+    end
+  end
+  return true
+end
+
+-- Shared impact-first validation for prospective room/corridor topology.
+-- The caller owns how prospective and baseline topology are applied; this
+-- function owns the common connectivity and protected-endpoint sequence.
+function World:_wouldBlockingOffAreaTopologyBeUnsafe(options)
+  local ingress_tiles, has_normal_spawns = self:getBlockingOffAreaIngressTiles()
+  if #ingress_tiles == 0 and not options.strict_check then
+    return nil, has_normal_spawns
+  end
+
+  local first_pass = options.with_candidate_topology(function(impact_baseline)
+    local blocked_tiles
+    if #ingress_tiles > 0 then
+      if options.check_existing and impact_baseline then
+        local ingress_broken, blocked_areas =
+          self:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
+        if ingress_broken then return {unsafe = true} end
+        if #blocked_areas > 0 then
+          blocked_tiles = self:_collectBlockingOffAreaTiles(blocked_areas)
+        end
+      end
+
+      if options.candidate_tiles and #options.candidate_tiles > 0 and
+          not self:_areBlockingOffAreaTilesConnectedToIngress(
+            options.candidate_tiles, ingress_tiles,
+            options.check_existing and impact_baseline or nil) then
+        return {unsafe = true}
+      end
+    end
+
+    if not has_normal_spawns and options.strict_check and options.strict_check() then
+      return {unsafe = true}
+    end
+    return {
+      unsafe = false,
+      blocked_tiles = blocked_tiles,
+      ingress_baseline = impact_baseline,
+    }
+  end, function()
+    if options.check_existing and #ingress_tiles > 0 then
+      return self:_captureBlockingOffAreaImpactBaseline(
+        ingress_tiles, options.boundary_tiles)
+    end
+  end)
+
+  if first_pass.unsafe then return true, has_normal_spawns end
+  if #ingress_tiles == 0 then return nil, has_normal_spawns end
+  if not first_pass.blocked_tiles then return false, has_normal_spawns end
+
+  local protected_options = options.protected_options or {}
+  protected_options.affected_tiles = first_pass.blocked_tiles
+  protected_options.ingress_baseline = first_pass.ingress_baseline
+
+  local function checkProtectedEndpoints()
+    local endpoints = self:_captureBlockingOffAreaProtectedBaseline(
+      ingress_tiles, protected_options)
+    return self:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
+  end
+
+  local protected_unsafe
+  if options.with_baseline_topology then
+    protected_unsafe = options.with_baseline_topology(checkProtectedEndpoints)
+  else
+    protected_unsafe = checkProtectedEndpoints()
+  end
+  return protected_unsafe, has_normal_spawns
+end
+
+--! Test a prospective corridor object topology.
+function World:wouldCorridorObjectBlockProtectedArea(x, y, object, orientation, options)
+  options = options or {}
+  local candidate_tiles = {}
+  if object.id == "reception_desk" then
+    local layout = object.orientations[orientation]
+    for _, name in ipairs(reception_usage_positions) do
+      local position = layout[name]
+      if position then
+        candidate_tiles[#candidate_tiles + 1] = {
+          x = x + position[1], y = y + position[2],
+        }
+      end
+    end
+  end
+
+  return self:_wouldBlockingOffAreaTopologyBeUnsafe({
+    boundary_tiles = self:_getCorridorCandidateBoundaryTiles(
+      x, y, object, orientation),
+    candidate_tiles = candidate_tiles,
+    check_existing = options.check_existing,
+    strict_check = options.strict_check,
+    protected_options = {check_humanoids = true},
+    with_candidate_topology = function(callback, before_candidate)
+      return self:_withProspectiveCorridorObjectTopology(
+        x, y, object, orientation, options.existing_object, callback,
+        before_candidate)
+    end,
+    with_baseline_topology = function(callback)
+      return self:_withCorridorObjectBaselineTopology(
+        options.existing_object, callback)
+    end,
+  })
 end
 
 function World:getPath(x, y, dest_x, dest_y)
