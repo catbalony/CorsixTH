@@ -1,0 +1,175 @@
+name: Build issue 826 split review
+
+on:
+  push:
+    branches:
+      - review/issue-826-split-builder
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build logical commit series
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=011b07a698c972b7a7c4e70e41d592f638182b0e
+          FINAL=95446ea21b2fff7dd53d9df543313bb8c72e7e1b
+          BRANCH=review/issue-826-split
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p /tmp/issue826-final
+          for path in \
+            CorsixTH/Lua/world.lua \
+            CorsixTH/Lua/dialogs/place_objects.lua \
+            CorsixTH/Lua/dialogs/place_staff.lua \
+            CorsixTH/Lua/dialogs/edit_room.lua \
+            CorsixTH/Luatest/spec/world_spec.lua; do
+            mkdir -p "/tmp/issue826-final/$(dirname "$path")"
+            git show "$FINAL:$path" > "/tmp/issue826-final/$path"
+          done
+
+          git checkout -B "$BRANCH" "$BASE"
+
+          # 1. Core impact detection and protected-endpoint policy.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('CorsixTH/Lua/world.lua')
+          base = path.read_text()
+          final = Path('/tmp/issue826-final/CorsixTH/Lua/world.lua').read_text()
+          prefix = final.index('-- Deliberately trapping humanoids')
+          helpers = final.index('-- Run a callback while recording pathfinding flag changes.')
+          ingress = final.index('--! Return the ingress tiles which corridor safety must preserve.')
+          side = final.index('-- Return the directional passability that removing one SideObject would leave.')
+          anchor = base.index('function World:getPath(x, y, dest_x, dest_y)')
+          core = final[prefix:helpers] + final[ingress:side]
+          path.write_text(base[:anchor] + core + base[anchor:])
+          PY
+          git add CorsixTH/Lua/world.lua
+          git diff --cached --check
+          git commit -m "Add #826 topology impact primitives"
+
+          # 2. Prospective object topology, rollback and shared validator.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('CorsixTH/Lua/world.lua')
+          current = path.read_text()
+          final = Path('/tmp/issue826-final/CorsixTH/Lua/world.lua').read_text()
+          helpers = final.index('-- Run a callback while recording pathfinding flag changes.')
+          ingress = final.index('--! Return the ingress tiles which corridor safety must preserve.')
+          side = final.index('-- Return the directional passability that removing one SideObject would leave.')
+          getpath = final.index('function World:getPath(x, y, dest_x, dest_y)')
+          current_ingress = current.index('--! Return the ingress tiles which corridor safety must preserve.')
+          current_getpath = current.index('function World:getPath(x, y, dest_x, dest_y)')
+          with_helpers = current[:current_ingress] + final[helpers:ingress] + current[current_ingress:]
+          current_getpath = with_helpers.index('function World:getPath(x, y, dest_x, dest_y)')
+          result = with_helpers[:current_getpath] + final[side:getpath] + with_helpers[current_getpath:]
+          assert result == final, 'world.lua split reconstruction does not equal final tree'
+          path.write_text(result)
+          PY
+          git add CorsixTH/Lua/world.lua
+          git diff --cached --check
+          git commit -m "Add #826 prospective corridor topology checks"
+
+          # 3. Wire corridor object and staff placement to the validator.
+          cp /tmp/issue826-final/CorsixTH/Lua/dialogs/place_objects.lua CorsixTH/Lua/dialogs/place_objects.lua
+          cp /tmp/issue826-final/CorsixTH/Lua/dialogs/place_staff.lua CorsixTH/Lua/dialogs/place_staff.lua
+          git add CorsixTH/Lua/dialogs/place_objects.lua CorsixTH/Lua/dialogs/place_staff.lua
+          git diff --cached --check
+          git commit -m "Apply #826 checks to corridor placement"
+
+          # 4. Wire room walls and doors to the same topology flow.
+          cp /tmp/issue826-final/CorsixTH/Lua/dialogs/edit_room.lua CorsixTH/Lua/dialogs/edit_room.lua
+          git add CorsixTH/Lua/dialogs/edit_room.lua
+          git diff --cached --check
+          git commit -m "Apply #826 checks to room placement"
+
+          # 5. Add rollback and placement regression coverage first.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('CorsixTH/Luatest/spec/world_spec.lua')
+          base = path.read_text()
+          final = Path('/tmp/issue826-final/CorsixTH/Luatest/spec/world_spec.lua').read_text()
+          base = base.replace('local EntityMap = _G["EntityMap"]\n',
+                              'local EntityMap = _G["EntityMap"]\nlocal Humanoid = _G["Humanoid"]\n', 1)
+          block_start = final.index('  describe("blocked-area connectivity", function)')
+          split = final.index('    it("checks multiple candidate tiles against the ingress network once", function)', block_start)
+          first_tests = final[block_start:split] + '  end)\n\n'
+          outer_end = base.rfind('\nend)\n')
+          assert outer_end >= 0
+          result = base[:outer_end + 1] + first_tests + base[outer_end + 1:]
+          path.write_text(result)
+          PY
+          git add CorsixTH/Luatest/spec/world_spec.lua
+          git diff --cached --check
+          git commit -m "Test #826 placement and rollback behavior"
+
+          # 6. Add affected-area, performance and transient-state regressions.
+          cp /tmp/issue826-final/CorsixTH/Luatest/spec/world_spec.lua CorsixTH/Luatest/spec/world_spec.lua
+          git add CorsixTH/Luatest/spec/world_spec.lua
+          git diff --cached --check
+          git commit -m "Test #826 affected-area and ingress optimizations"
+
+          # The rewritten history must produce the exact already-reviewed tree.
+          git diff --exit-code "$FINAL" -- .
+          test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse "$FINAL^{tree}")"
+          git diff --check "$BASE..HEAD"
+
+          # Export one diff per logical commit for offline review.
+          rm -rf /tmp/issue826-handoff
+          mkdir -p /tmp/issue826-handoff/diffs
+          mapfile -t commits < <(git rev-list --reverse "$BASE..HEAD")
+          names=(
+            01_topology_impact_primitives.diff
+            02_prospective_corridor_topology.diff
+            03_corridor_placement_integration.diff
+            04_room_placement_integration.diff
+            05_placement_and_rollback_tests.diff
+            06_affected_area_and_performance_tests.diff
+          )
+          for i in "${!commits[@]}"; do
+            git diff "${commits[$i]}^" "${commits[$i]}" --binary > "/tmp/issue826-handoff/diffs/${names[$i]}"
+          done
+
+          {
+            echo '# CorsixTH #826 review order'
+            echo
+            echo "Base: \`$BASE\`"
+            echo "Final reference tree: \`$FINAL\`"
+            echo "Split branch: \`$BRANCH\`"
+            echo
+            echo 'The six commits are intended to be reviewed in order:'
+            echo
+            for i in "${!commits[@]}"; do
+              subject=$(git show -s --format=%s "${commits[$i]}")
+              n=$((i + 1))
+              echo "$n. \`${commits[$i]}\` — $subject"
+              echo "   - \`diffs/${names[$i]}\`"
+            done
+            echo
+            echo 'The final split-branch tree is byte-for-byte identical to the already CI-green refactor commit.'
+          } > /tmp/issue826-handoff/REVIEW_ORDER.md
+
+          (cd /tmp/issue826-handoff && sha256sum REVIEW_ORDER.md diffs/*.diff > SHA256SUMS.txt)
+          (cd /tmp && zip -qr CorsixTH_826_SPLIT_review_handoff.zip issue826-handoff)
+          sha256sum /tmp/CorsixTH_826_SPLIT_review_handoff.zip > /tmp/ZIP_SHA256.txt
+
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+      - name: Upload split review bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: CorsixTH-826-split-review-handoff
+          path: |
+            /tmp/CorsixTH_826_SPLIT_review_handoff.zip
+            /tmp/ZIP_SHA256.txt
+          if-no-files-found: error
