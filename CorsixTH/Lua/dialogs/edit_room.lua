@@ -1051,83 +1051,47 @@ function UIEditRoom:_getProspectiveRoomBoundaryTiles()
 end
 
 -- Check prospective room walls. Candidate door connectivity is always checked,
--- while existing doors, Reception Desks and humanoids are inspected only when
--- the room actually creates a new blocked corridor component.
-function UIEditRoom:_isProspectiveRoomNetworkValid(options)
+-- while existing protected endpoints are inspected only after an actual impact.
+function UIEditRoom:_isRoomPlacementNetworkValid(options)
   options = options or {}
   local world = self.ui.app.world
-  local ingress_tiles, has_normal_spawns = world:getBlockingOffAreaIngressTiles()
-  local door_tile
+  local candidate_tiles
 
   if options.include_door then
     local x, y = self:_getBlueprintDoorOutsideTile()
     if not x then return false end
-    door_tile = {x = x, y = y}
+    candidate_tiles = {{x = x, y = y}}
   end
 
-  local protected_valid
-  if #ingress_tiles > 0 then
-    local boundary_tiles = self:_getProspectiveRoomBoundaryTiles()
-    local impact_baseline = world:_captureBlockingOffAreaImpactBaseline(
-      ingress_tiles, boundary_tiles)
+  local unsafe, has_normal_spawns =
+    world:_wouldBlockingOffAreaTopologyBeUnsafe({
+      boundary_tiles = self:_getProspectiveRoomBoundaryTiles(),
+      candidate_tiles = candidate_tiles,
+      check_existing = options.check_humanoids,
+      protected_options = {
+        ignored_room = self.room,
+        check_humanoids = options.check_humanoids,
+      },
+      with_candidate_topology = function(callback, before_candidate)
+        local baseline = before_candidate and before_candidate()
+        return self:_withProspectiveRoomTopology(function()
+          return callback(baseline)
+        end)
+      end,
+    })
 
-    local first_pass = self:_withProspectiveRoomTopology(function()
-      local blocked_tiles
-      if options.check_humanoids then
-        local ingress_broken, blocked_areas =
-          world:_getBlockingOffAreaImpact(ingress_tiles, impact_baseline)
-        if ingress_broken then return {unsafe = true} end
-        if #blocked_areas > 0 then
-          blocked_tiles = world:_collectBlockingOffAreaTiles(blocked_areas)
-        end
-      end
-
-      if door_tile then
-        local connected
-        if options.check_humanoids then
-          connected = world:_areBlockingOffAreaTilesConnectedToIngressComponents(
-            {door_tile}, ingress_tiles, impact_baseline)
-        else
-          connected = world:isTileConnectedToBlockingOffAreaIngress(
-            door_tile.x, door_tile.y, ingress_tiles)
-        end
-        if not connected then return {unsafe = true} end
-      end
-
-      return {unsafe = false, blocked_tiles = blocked_tiles}
-    end)
-
-    protected_valid = not first_pass.unsafe
-    if protected_valid and first_pass.blocked_tiles then
-      local endpoints = world:_captureBlockingOffAreaProtectedBaseline(
-        ingress_tiles, {
-          ignored_room = self.room,
-          check_humanoids = options.check_humanoids,
-          affected_tiles = first_pass.blocked_tiles,
-          ingress_baseline = impact_baseline,
-        })
-      protected_valid = not world:_blockingOffAreaProtectedEndpointsUnsafe(endpoints)
-    end
-  end
-
-  if has_normal_spawns then
-    return protected_valid
-  end
+  if has_normal_spawns then return unsafe == false end
 
   local strict_valid = self:_withBlockedRoomBlueprint(function()
     return self:checkReachability()
   end)
-  return strict_valid and protected_valid ~= false
+  return strict_valid and unsafe ~= true
 end
 
 -- Candidate doors are protected endpoints and must never be accepted by a
 -- vacuous empty-ingress test.
 function UIEditRoom:_isBlueprintDoorNetworkValid()
-  return self:_isProspectiveRoomNetworkValid({include_door = true})
-end
-
-function UIEditRoom:_isRoomPlacementNetworkValid(options)
-  return self:_isProspectiveRoomNetworkValid(options)
+  return self:_isRoomPlacementNetworkValid({include_door = true})
 end
 
 function UIEditRoom:enterDoorPhase()

@@ -50,27 +50,10 @@ describe("special-map blocked-area UI connectivity", function()
     function world:getBlockingOffAreaIngressTiles()
       return ingress_tiles, has_normal_spawns
     end
-    function world:_captureBlockingOffAreaImpactBaseline()
-      return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
-    end
-    function world:_getBlockingOffAreaImpact()
-      return false, protected_result and {} or {{x = 1, y = 1}}
-    end
-    function world:isTileConnectedToBlockingOffAreaIngress()
-      return protected_result
-    end
-    function world:_areBlockingOffAreaTilesConnectedToIngressComponents()
-      return protected_result
-    end
-    function world:_collectBlockingOffAreaTiles()
-      return {["1:1"] = true}
-    end
-    function world:_captureBlockingOffAreaProtectedBaseline()
-      calls.protected = calls.protected + 1
-      return {}
-    end
-    function world:_blockingOffAreaProtectedEndpointsUnsafe()
-      return not protected_result
+    function world:_wouldBlockingOffAreaTopologyBeUnsafe()
+      if #ingress_tiles == 0 then return nil, has_normal_spawns end
+      calls.prospective = calls.prospective + 1
+      return not protected_result, has_normal_spawns
     end
 
     local edit_room = {
@@ -81,10 +64,6 @@ describe("special-map blocked-area UI connectivity", function()
     setmetatable(edit_room, {__index = UIEditRoom})
     function edit_room:_getBlueprintDoorOutsideTile()
       return 7, 8
-    end
-    function edit_room:_withProspectiveRoomTopology(callback)
-      calls.prospective = calls.prospective + 1
-      return callback()
     end
     function edit_room:_withBlockedRoomBlueprint(callback)
       calls.strict = calls.strict + 1

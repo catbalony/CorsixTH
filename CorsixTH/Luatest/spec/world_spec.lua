@@ -838,7 +838,6 @@ describe("world.lua: ", function()
       world._getCorridorCandidateBoundaryTiles = function()
         return {{x = 2, y = 1}}
       end
-      world._getCorridorCandidateProtectedTiles = function() return {} end
       world._captureBlockingOffAreaImpactBaseline = function()
         return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
       end
@@ -871,7 +870,6 @@ describe("world.lua: ", function()
       world._getCorridorCandidateBoundaryTiles = function()
         return {{x = 2, y = 1}}
       end
-      world._getCorridorCandidateProtectedTiles = function() return {} end
       world._captureBlockingOffAreaImpactBaseline = function()
         return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
       end
