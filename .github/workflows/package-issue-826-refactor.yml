@@ -1,0 +1,150 @@
+name: Package issue 826 refactor handoff
+
+on:
+  push:
+    branches:
+      - review/issue-826-refactor-package
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify handoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=011b07a698c972b7a7c4e70e41d592f638182b0e
+          FINAL=95446ea21b2fff7dd53d9df543313bb8c72e7e1b
+          OUT="$RUNNER_TEMP/issue826-handoff"
+          VERIFY="$RUNNER_TEMP/issue826-verify"
+          ZIP="$RUNNER_TEMP/CorsixTH_826_REFACTOR_final_developer_handoff.zip"
+
+          rm -rf "$OUT" "$VERIFY" "$ZIP"
+          mkdir -p "$OUT"
+
+          git cat-file -e "$BASE^{commit}"
+          git cat-file -e "$FINAL^{commit}"
+
+          expected_files=$(cat <<'EOF'
+          CorsixTH/Lua/dialogs/edit_room.lua
+          CorsixTH/Lua/dialogs/place_objects.lua
+          CorsixTH/Lua/dialogs/place_staff.lua
+          CorsixTH/Lua/world.lua
+          CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua
+          CorsixTH/Luatest/spec/world_spec.lua
+          EOF
+          )
+          actual_files=$(git diff --name-only "$BASE" "$FINAL" | sort)
+          test "$actual_files" = "$(printf '%s\n' "$expected_files" | sort)"
+
+          git diff --binary --full-index "$BASE" "$FINAL" -- \
+            CorsixTH/Lua/dialogs/edit_room.lua \
+            CorsixTH/Lua/dialogs/place_objects.lua \
+            CorsixTH/Lua/dialogs/place_staff.lua \
+            CorsixTH/Lua/world.lua \
+            CorsixTH/Luatest/spec/blocking_off_area_ui_spec.lua \
+            CorsixTH/Luatest/spec/world_spec.lua \
+            > "$OUT/FINAL_PATCH.diff"
+
+          test -s "$OUT/FINAL_PATCH.diff"
+          git diff --check "$BASE" "$FINAL"
+
+          cat > "$OUT/DEV_README.md" <<'EOF'
+          # CorsixTH issue #826 — refactored developer handoff
+
+          Original base: `011b07a698c972b7a7c4e70e41d592f638182b0e`
+          Refactored final: `95446ea21b2fff7dd53d9df543313bb8c72e7e1b`
+          Review branch: `review/issue-826-refactor`
+
+          This is the optimized #826 implementation with a follow-up consolidation pass. The room and corridor-object validation paths now share the same impact-first topology validator, and redundant endpoint-connectivity helper layers were collapsed. The affected-area flood fill, ingress connected-component reuse, transient humanoid logical-position handling, and final-check-only protected scans are retained.
+
+          Compared with the previously optimized head `274c887b854143a7608da97f56b8916a54a6d288`, the refactor changes only four files and removes 93 net lines overall (70 net production Lua lines).
+
+          Validation on the exact refactor commit:
+          - Linux CI run `36433401993`: success (Lua 5.1 tests/source/docs, LuaJIT, Lua 5.5/native/clang).
+          - Windows CI run `36433402014`: success (configure, build, CTest, install).
+          - The patch in this bundle is generated from the exact original base to the exact refactored final commit and is reapplied in an isolated worktree during packaging; all six resulting Git blob hashes must match the final commit before the ZIP is uploaded.
+
+          Manual performance validation is still useful with `Argus_SuperDuper_100.sav.zip`: enclose one empty tile with four plants and confirm the fourth placement no longer causes the previously reported perceived lag spike. This scenario has not been benchmarked manually in this handoff.
+          EOF
+
+          cat > "$OUT/FINAL_REVIEW.md" <<'EOF'
+          # Final review — CorsixTH issue #826
+
+          Final head: `95446ea21b2fff7dd53d9df543313bb8c72e7e1b`
+          Parent optimized head: `274c887b854143a7608da97f56b8916a54a6d288`
+          Original base: `011b07a698c972b7a7c4e70e41d592f638182b0e`
+
+          ## Refactor scope
+
+          The follow-up pass is intended to reduce implementation size without changing #826 behaviour:
+          - room and corridor-object placement use one shared impact-first validation sequence;
+          - tile/humanoid endpoint reachability uses one shared primitive, including ingress-component reuse;
+          - Reception Desk protected-tile handling is folded into the common helpers;
+          - duplicated UI test scaffolding was removed.
+
+          The refactor is one clean commit directly on top of the known-good optimized head. Its compare is 161 additions / 254 deletions: 93 net lines removed overall, including 70 net lines from production Lua.
+
+          ## Preserved behaviour
+
+          Protected doors, Reception Desk endpoints and humanoids are still inspected only after a candidate creates a relevant topology impact. Newly blocked components are flood-filled and endpoint pathfinding is restricted to logical positions within those affected tiles. Pre-existing ingress components are reused to avoid all-pairs checks, and transient object-use positions remain handled for `use_object`, `multi_use_object` and `staff_reception`.
+
+          ## Automated validation
+
+          Exact refactor commit `95446ea21b2fff7dd53d9df543313bb8c72e7e1b` passed Linux run `36433401993` and Windows run `36433402014`.
+
+          ## Remaining manual check
+
+          Re-run the developer's `Argus_SuperDuper_100.sav.zip` four-plant enclosure scenario to confirm the perceived runtime lag is gone in that save. The code path no longer performs hospital-wide protected-endpoint pathfinding for an empty one-tile enclosure, but this handoff does not claim a measured savegame benchmark.
+          EOF
+
+          (
+            cd "$OUT"
+            sha256sum FINAL_PATCH.diff DEV_README.md FINAL_REVIEW.md > SHA256SUMS.txt
+          )
+
+          git worktree add --detach "$VERIFY" "$BASE"
+          git -C "$VERIFY" apply --check "$OUT/FINAL_PATCH.diff"
+          git -C "$VERIFY" apply "$OUT/FINAL_PATCH.diff"
+
+          while IFS= read -r path; do
+            got=$(git -C "$VERIFY" hash-object "$path")
+            want=$(git rev-parse "$FINAL:$path")
+            test "$got" = "$want"
+          done <<< "$actual_files"
+
+          (
+            cd "$OUT"
+            sha256sum -c SHA256SUMS.txt
+            zip -q -j "$ZIP" FINAL_PATCH.diff DEV_README.md FINAL_REVIEW.md SHA256SUMS.txt
+          )
+          unzip -t "$ZIP"
+
+          rm -rf "$RUNNER_TEMP/issue826-package-check"
+          mkdir -p "$RUNNER_TEMP/issue826-package-check"
+          unzip -q "$ZIP" -d "$RUNNER_TEMP/issue826-package-check"
+          (
+            cd "$RUNNER_TEMP/issue826-package-check"
+            sha256sum -c SHA256SUMS.txt
+            test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
+          )
+
+          sha256sum "$ZIP" | tee "$RUNNER_TEMP/ZIP_SHA256.txt"
+
+      - name: Upload verified developer ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: CorsixTH-826-refactor-final-handoff
+          path: |
+            ${{ runner.temp }}/CorsixTH_826_REFACTOR_final_developer_handoff.zip
+            ${{ runner.temp }}/ZIP_SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
