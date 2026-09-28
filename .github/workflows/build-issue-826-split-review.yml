@@ -69,7 +69,6 @@ jobs:
           side = final.index('-- Return the directional passability that removing one SideObject would leave.')
           getpath = final.index('function World:getPath(x, y, dest_x, dest_y)')
           current_ingress = current.index('--! Return the ingress tiles which corridor safety must preserve.')
-          current_getpath = current.index('function World:getPath(x, y, dest_x, dest_y)')
           with_helpers = current[:current_ingress] + final[helpers:ingress] + current[current_ingress:]
           current_getpath = with_helpers.index('function World:getPath(x, y, dest_x, dest_y)')
           result = with_helpers[:current_getpath] + final[side:getpath] + with_helpers[current_getpath:]
@@ -101,8 +100,8 @@ jobs:
           final = Path('/tmp/issue826-final/CorsixTH/Luatest/spec/world_spec.lua').read_text()
           base = base.replace('local EntityMap = _G["EntityMap"]\n',
                               'local EntityMap = _G["EntityMap"]\nlocal Humanoid = _G["Humanoid"]\n', 1)
-          block_start = final.index('  describe("blocked-area connectivity", function)')
-          split = final.index('    it("checks multiple candidate tiles against the ingress network once", function)', block_start)
+          block_start = final.index('  describe("blocked-area connectivity", function()')
+          split = final.index('    it("checks multiple candidate tiles against the ingress network once", function()', block_start)
           first_tests = final[block_start:split] + '  end)\n\n'
           outer_end = base.rfind('\nend)\n')
           assert outer_end >= 0
