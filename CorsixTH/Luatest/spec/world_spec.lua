@@ -42,6 +42,7 @@ _G._A = saved_A
 
 local World = _G["World"]
 local EntityMap = _G["EntityMap"]
+local Humanoid = _G["Humanoid"]
 
 describe("world.lua: ", function()
   local function makeWorld(entities)
@@ -523,4 +524,389 @@ describe("world.lua: ", function()
     assert.is_true(world:isNearRat(-56, 2000))
     assert.is_false(world:isNearRat(-57, 2000))
   end)
+  describe("blocked-area connectivity", function()
+    local function makeFlagMap(initial)
+      local flags = {}
+      for key, values in pairs(initial) do
+        flags[key] = {}
+        for name, value in pairs(values) do flags[key][name] = value end
+      end
+
+      local map = {}
+      function map:getCellFlags(x, y)
+        return flags[x .. ":" .. y]
+      end
+      function map:setCellFlags(x, y, changed)
+        local tile = flags[x .. ":" .. y]
+        for name, value in pairs(changed) do tile[name] = value end
+      end
+      function map:getCell()
+        return 0
+      end
+      return map, flags
+    end
+
+    it("allows a humanoid to path from a non-passable starting tile", function()
+      local map = makeFlagMap({
+        ["1:1"] = {passable = true},
+        ["2:2"] = {passable = false},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 10 and 1 <= y and y <= 10
+      end
+      world.pathfinder = {
+        findDistance = function(_, x1, y1, x2, y2)
+          return x1 == 2 and y1 == 2 and x2 == 1 and y2 == 1 and 1 or nil
+        end,
+      }
+      local ingress = {{x = 1, y = 1}}
+
+      assert.is_false(world:isTileConnectedToBlockingOffAreaIngress(2, 2, ingress))
+      assert.is_true(world:isHumanoidConnectedToBlockingOffAreaIngress(2, 2, ingress))
+    end)
+
+    it("runs the zero-spawn fallback with old topology removed and rolls back", function()
+      local map, flags = makeFlagMap({
+        ["1:1"] = {passable = false},
+        ["3:1"] = {passable = true},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.spawn_points = {}
+      world.rooms = {}
+      world.objects = {}
+      world.isOnMap = function(_, x, y)
+        return (x == 1 or x == 3) and y == 1
+      end
+      world.getLocalPlayerHospital = function() return nil end
+
+      local object_type = {
+        id = "plant",
+        class = "Object",
+        orientations = {north = {footprint = {{0, 0}}}},
+      }
+      local existing_object = {
+        picked_up = true,
+        tile_x = 1,
+        tile_y = 1,
+        direction = "north",
+        object_type = object_type,
+        th = {isVisible = function() return false end},
+      }
+
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {
+          existing_object = existing_object,
+          check_existing = true,
+          strict_check = function()
+            assert.is_true(flags["1:1"].passable)
+            assert.is_false(flags["3:1"].passable)
+            return false
+          end,
+        })
+
+      assert.is_nil(unsafe)
+      assert.is_false(flags["1:1"].passable)
+      assert.is_true(flags["3:1"].passable)
+    end)
+
+    it("uses the zero-anchor strict fallback for a Reception Desk", function()
+      local map, flags = makeFlagMap({
+        ["3:1"] = {passable = true},
+        ["4:1"] = {passable = true},
+        ["5:1"] = {passable = true},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.spawn_points = {}
+      world.rooms = {}
+      world.objects = {}
+      world.isOnMap = function(_, x, y)
+        return 3 <= x and x <= 5 and y == 1
+      end
+      world.getLocalPlayerHospital = function() return nil end
+
+      local object_type = {
+        id = "reception_desk",
+        class = "Object",
+        orientations = {
+          north = {
+            footprint = {{0, 0}},
+            use_position = {1, 0},
+            use_position_secondary = {2, 0},
+          },
+        },
+      }
+
+      local strict_calls = 0
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {
+          check_existing = false,
+          strict_check = function()
+            strict_calls = strict_calls + 1
+            assert.is_false(flags["3:1"].passable)
+            return false
+          end,
+        })
+
+      assert.are.equal(1, strict_calls)
+      assert.is_nil(unsafe)
+      assert.is_true(flags["3:1"].passable)
+
+      unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {
+          check_existing = false,
+          strict_check = function()
+            return true
+          end,
+        })
+      assert.is_true(unsafe)
+      assert.is_true(flags["3:1"].passable)
+    end)
+
+    it("runs the zero-spawn SideObject fallback with old edge removed", function()
+      local map, flags = makeFlagMap({
+        ["1:1"] = {travelEast = false},
+        ["2:1"] = {travelWest = false},
+        ["3:1"] = {travelEast = true},
+        ["4:1"] = {travelWest = true},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.spawn_points = {}
+      world.rooms = {}
+      world.objects = {}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 4 and y == 1
+      end
+      world.getLocalPlayerHospital = function() return nil end
+
+      local object_type = {
+        id = "radiator",
+        class = "SideObject",
+        orientations = {east = {footprint = {{0, 0, only_side = true}}}},
+      }
+      local existing_object = {
+        picked_up = true,
+        set_passable_flags = true,
+        tile_x = 1,
+        tile_y = 1,
+        direction = "east",
+        object_type = object_type,
+        th = {isVisible = function() return false end},
+      }
+
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "east", {
+          existing_object = existing_object,
+          check_existing = true,
+          strict_check = function()
+            assert.is_true(flags["1:1"].travelEast)
+            assert.is_true(flags["2:1"].travelWest)
+            assert.is_false(flags["3:1"].travelEast)
+            assert.is_false(flags["4:1"].travelWest)
+            return false
+          end,
+        })
+
+      assert.is_nil(unsafe)
+      assert.is_false(flags["1:1"].travelEast)
+      assert.is_false(flags["2:1"].travelWest)
+      assert.is_true(flags["3:1"].travelEast)
+      assert.is_true(flags["4:1"].travelWest)
+    end)
+
+    it("keeps a SideObject edge blocked when another object covers it", function()
+      local map, flags = makeFlagMap({
+        ["1:1"] = {travelEast = false},
+        ["2:1"] = {travelWest = false},
+        ["3:1"] = {travelEast = true},
+        ["4:1"] = {travelWest = true},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.spawn_points = {}
+      world.rooms = {}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 4 and y == 1
+      end
+      world.getLocalPlayerHospital = function() return nil end
+
+      local object_type = {
+        id = "radiator",
+        class = "SideObject",
+        orientations = {
+          east = {footprint = {{0, 0, only_side = true}}},
+          west = {footprint = {{0, 0, only_side = true}}},
+        },
+      }
+      local existing_object = {
+        picked_up = true,
+        set_passable_flags = true,
+        tile_x = 1,
+        tile_y = 1,
+        direction = "east",
+        object_type = object_type,
+        th = {isVisible = function() return false end},
+      }
+      local overlapping_object = {
+        tile_x = 2,
+        tile_y = 1,
+        direction = "west",
+        object_type = object_type,
+      }
+      world.objects = {
+        [1] = {existing_object},
+        [2] = {overlapping_object},
+      }
+
+      world:wouldCorridorObjectBlockProtectedArea(3, 1, object_type, "east", {
+        existing_object = existing_object,
+        strict_check = function()
+          assert.is_false(flags["1:1"].travelEast)
+          assert.is_false(flags["2:1"].travelWest)
+          assert.is_false(flags["3:1"].travelEast)
+          assert.is_false(flags["4:1"].travelWest)
+          return false
+        end,
+      })
+
+      assert.is_false(flags["1:1"].travelEast)
+      assert.is_false(flags["2:1"].travelWest)
+      assert.is_true(flags["3:1"].travelEast)
+      assert.is_true(flags["4:1"].travelWest)
+    end)
+
+    it("protects Reception Desk candidate usage positions", function()
+      local map, flags = makeFlagMap({
+        ["1:1"] = {passable = true},
+        ["3:1"] = {passable = true},
+        ["4:1"] = {passable = true},
+        ["5:1"] = {passable = true},
+      })
+      local world = makeWorld({})
+      world.map = {th = map}
+      world.spawn_points = {{x = 1, y = 1}}
+      world.rooms = {}
+      world.objects = {}
+      world.isOnMap = function(_, x, y)
+        return 1 <= x and x <= 5 and y == 1
+      end
+      world.getLocalPlayerHospital = function() return nil end
+
+      local secondary_connected = false
+      world.pathfinder = {
+        findDistance = function(_, x1, y1, x2, y2)
+          if x2 ~= 1 or y2 ~= 1 then return nil end
+          if x1 == 1 and y1 == 1 then return 0 end
+          if x1 == 4 and y1 == 1 then return 3 end
+          if x1 == 5 and y1 == 1 and secondary_connected then return 4 end
+          return nil
+        end,
+      }
+
+      local object_type = {
+        id = "reception_desk",
+        class = "Object",
+        orientations = {
+          north = {
+            footprint = {{0, 0}},
+            use_position = {1, 0},
+            use_position_secondary = {2, 0},
+          },
+        },
+      }
+
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {check_existing = false})
+      assert.is_true(unsafe)
+      assert.is_true(flags["3:1"].passable)
+
+      secondary_connected = true
+      unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {check_existing = false})
+      assert.is_false(unsafe)
+      assert.is_true(flags["3:1"].passable)
+    end)
+
+    it("does not scan protected endpoints when placement has no topology impact", function()
+      local world = makeWorld({})
+      world.spawn_points = {{x = 1, y = 1}}
+      world.getLocalPlayerHospital = function() return nil end
+      world._getCorridorCandidateBoundaryTiles = function()
+        return {{x = 2, y = 1}}
+      end
+      world._captureBlockingOffAreaImpactBaseline = function()
+        return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
+      end
+      world._getBlockingOffAreaImpact = function()
+        return false, {}
+      end
+      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, _, callback, before)
+        local baseline = before and before()
+        return callback(baseline)
+      end
+      world._captureBlockingOffAreaProtectedBaseline = function()
+        error("protected endpoints must not be scanned")
+      end
+
+      local object_type = {
+        id = "plant",
+        class = "Object",
+        orientations = {north = {footprint = {{0, 0}}}},
+      }
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {check_existing = true})
+
+      assert.is_false(unsafe)
+    end)
+
+    it("defers protected endpoint scan until a new blocked area exists", function()
+      local world = makeWorld({})
+      world.spawn_points = {{x = 1, y = 1}}
+      world.getLocalPlayerHospital = function() return nil end
+      world._getCorridorCandidateBoundaryTiles = function()
+        return {{x = 2, y = 1}}
+      end
+      world._captureBlockingOffAreaImpactBaseline = function()
+        return {tiles = {}, reaches_ingress = {}, ingress_components = {}}
+      end
+      world._getBlockingOffAreaImpact = function()
+        return false, {{x = 2, y = 1}}
+      end
+      world._collectBlockingOffAreaTiles = function(_, areas)
+        assert.are.equal(1, #areas)
+        return {["2:1"] = true}
+      end
+      world._withProspectiveCorridorObjectTopology = function(_, _, _, _, _, _, callback, before)
+        local baseline = before and before()
+        return callback(baseline)
+      end
+      local protected_calls = 0
+      world._captureBlockingOffAreaProtectedBaseline = function(_, _, options)
+        protected_calls = protected_calls + 1
+        assert.is_true(options.affected_tiles["2:1"])
+        return {{x = 2, y = 1, was_valid = true, description = "room door"}}
+      end
+      world._blockingOffAreaProtectedEndpointsUnsafe = function(_, endpoints)
+        assert.are.equal(1, #endpoints)
+        return true
+      end
+
+      local object_type = {
+        id = "plant",
+        class = "Object",
+        orientations = {north = {footprint = {{0, 0}}}},
+      }
+      local unsafe = world:wouldCorridorObjectBlockProtectedArea(
+        3, 1, object_type, "north", {check_existing = true})
+
+      assert.is_true(unsafe)
+      assert.are.equal(1, protected_calls)
+    end)
+
+  end)
+
 end)
