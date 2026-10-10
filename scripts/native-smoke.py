@@ -291,6 +291,34 @@ def run(args: argparse.Namespace) -> None:
                         last_overview_big = capture_overview_click(788, 600)
                     x.resize_window(640, 480)
                     require(x.window_size() == (640, 480), 'Assembly restore failed')
+                if args.assembly_pick_check:
+                    # Native composited-image hit testing, separate from chips
+                    # and overview. Focus changes are asserted from real SDL
+                    # pixel captures, not inferred from successful mouse calls.
+                    require(x.window_size() == (640, 480),
+                            'native preview pixel assertions require 640x480')
+                    def capture_preview(action) -> Path:
+                        before = set(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png'))
+                        action()
+                        x.key('x')
+                        time.sleep(.2)
+                        created = set(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png')) - before
+                        require(len(created) == 1, 'Expected one new native composite screenshot')
+                        return created.pop()
+                    x.key('End')
+                    picked_strip_8 = capture_preview(lambda: x.click_window(480, 215))
+                    picked_strip_9 = capture_preview(lambda: x.click_window(575, 215))
+                    x.key('m')   # overlapping zero-offset layers
+                    picked_layer_9 = capture_preview(lambda: x.click_window(300, 215))
+                    shift = x.code('Shift_L')
+                    def shift_pick():
+                        x.down(shift)
+                        try: x.click_window(300, 215)
+                        finally: x.up(shift)
+                    picked_layer_8 = capture_preview(shift_pick)
+                    picked_layer_7 = capture_preview(shift_pick)
+                    x.key('m')
+                    x.key('End')
                 def assembly_button(action: str, mode: str) -> None:
                     # Layout.assembly_controls is based on the visible canvas
                     # width, not constant coordinates from an earlier release.
@@ -460,6 +488,28 @@ def run(args: argparse.Namespace) -> None:
                 f'{focus_first} -> {focus_second} -> {focus_last} / {image_width}')
         if args.resize_check:
             verify_clicks(first_overview_big, last_overview_big)
+    if args.assembly_pick_check:
+        try:
+            from PIL import Image
+        except ImportError as ex:
+            raise RuntimeError('Native preview focus assertions require Pillow') from ex
+        highlight = (132, 199, 206)
+        def inspect_focus(png: Path, chip_x: int) -> None:
+            with Image.open(png) as im:
+                rgb = im.convert('RGB')
+                require(rgb.size == (640, 480), f'Unexpected native capture size: {png}')
+                actual = rgb.getpixel((chip_x, 446))
+                require(actual == highlight,
+                        f'Click on preview did not focus expected component at x={chip_x}: '
+                        f'got {actual} instead of {highlight} in {png.name}')
+        # Stable component pages have eight chips per page at 640px.
+        # Strip focus #8 / #9; overlapping layers should pick topmost #9,
+        # then Shift-cycle behind to #8 and #7 in actual draw order.
+        inspect_focus(picked_strip_8, 510)
+        inspect_focus(picked_strip_9, 20)
+        inspect_focus(picked_layer_9, 20)
+        inspect_focus(picked_layer_8, 510)
+        inspect_focus(picked_layer_7, 440)
     print(f'PASS: real CorsixTH SDL launch, search, range select, 9-frame recipe, screenshot, animation & clean exit')
     print(f'  log: {logfile}\n  recipe: {recipe}\n  native PNGs: {len(captured)}')
 
@@ -481,6 +531,8 @@ def main() -> None:
                    help='edit copies, order and layer offsets using real SDL mouse events')
     p.add_argument('--assembly-history-check', action='store_true',
                    help='undo/redo native assembly edits, assert saved backup/final recipes')
+    p.add_argument('--assembly-pick-check', action='store_true',
+                   help='click composited sprites and Shift-cycle overlapping layers with native PNG focus checks')
     args = p.parse_args()
     if args.assembly_history_check and not args.assembly_edit_check:
         p.error('--assembly-history-check requires --assembly-edit-check')
