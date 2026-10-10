@@ -1100,6 +1100,9 @@ local function DoMouseUp(_, button, x, y)
 end
 
 local function DoMouseWheel(_, x, y)
+  -- Wheel focus navigation must not let an unfinished drag carry across to
+  -- a different focused layer. Restore the preview before changing focus.
+  if assembly_drag then CancelAssemblyDrag() end
   if browser_kind and y ~= 0 then
     browser_cursor = math.max(1, math.min(#browser_results,
       browser_cursor - math.floor(y)))
