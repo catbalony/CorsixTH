@@ -66,3 +66,15 @@ the clicks indicate. It rejects unsupported startup sizes. The overview
 naturally disappears when the entire 792px ECG strip fits an 800px viewport.
 See `docs/NATIVE_INPUT_AND_RESIZE.md` for the diagnostic and commands.
 The GitHub Actions workflow remains `workflow_dispatch` only.
+
+## v14 — assembly editing controls
+
+The assembly UI now has bounded click controls for ordering, copies (strip),
+XY offsets (layers) and reset. Both keyboard and mouse call
+`CorsixTH/Lua/sprite_viewer_assembly.lua`; avoid introducing duplicate
+mutations into the event handlers. `Layout.assembly_controls` lays out the
+native-graphics buttons. See `docs/ASSEMBLY_EDITING.md`. For real SDL
+verification, run `scripts/native-smoke.py --assembly-edit-check`, preferably
+with `--resize-check --assembly-navigation-check` too. That test checks the
+actual saved recipe for sprite #9's order, repeat count and offsets, not just
+whether buttons rendered. Do not commit screenshots with game artwork.
