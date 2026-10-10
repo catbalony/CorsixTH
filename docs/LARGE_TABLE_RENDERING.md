@@ -49,10 +49,11 @@ python3 scripts/native-smoke.py \
   --resize-check
 ```
 
-The resize check uses the actual X11 CorsixTH window, takes 320x200 gallery
-and assembly screenshots plus a 640x480 screenshot, and validates their PNG
-headers, output dimensions, fresh recipe contents, and the game's error log.
-Tested with CorsixTH 0.70.1 on Linux Xvfb and the original PANEL04V resource.
+The current resize check uses the actual X11 CorsixTH window at **800x600**
+and **640x480**, validates native screenshots, fresh recipe contents, and
+the game's error log. Previous experiments forced 320x200, below CorsixTH
+0.70.1's 640x480 minimum; those are not supported native acceptance tests.
+See `NATIVE_INPUT_AND_RESIZE.md` for the source-backed correction.
 
 ## Known limitations
 

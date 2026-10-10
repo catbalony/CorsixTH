@@ -32,4 +32,10 @@ At startup, the viewer tries the next resource if the first discovered table is 
 
 The local Lua suite includes a dedicated failure-injection test for corrupt DAT/TAB loads, palette failures, invalid decoder modes, compact tab hit targets, filename clipping and help pagination. The full pre-existing test suite also passes.
 
-The AppImage **CorsixTH 0.70.1** native smoke test passes under Xvfb with the supplied Theme Hospital assets and a real **320x200→640x480** X11 resize. It produces fresh 320x200/640x480 native screenshots, a versioned nine-sprite assembly recipe, playback and clean return. Native test inputs, screenshots and the AppImage remain outside the public Git repository.
+The AppImage **CorsixTH 0.70.1** smoke test ran under Xvfb with the supplied
+Theme Hospital assets, nine-sprite recipe and playback. At that time, an
+external X11 call also forced the window to 320x200; **this is below the
+host application's explicit 640x480 minimum**. Those cropped images are
+historical diagnostics, not supported-size native acceptance evidence.
+See `NATIVE_INPUT_AND_RESIZE.md` for the later verified 640x480/800x600
+input and rendering tests. Proprietary assets remain outside public Git.

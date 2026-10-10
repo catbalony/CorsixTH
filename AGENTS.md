@@ -49,3 +49,20 @@ overview clicks at 640x480. Forced X11 resize screenshots at 320x200 do not
 establish compact native mouse correctness. Run locally with
 `--assembly-navigation-check --resize-check`; do not enable automatic
 GitHub Actions for this branch.
+
+## v13 — supported native input and size (supersedes the v12 resize note)
+
+CorsixTH **0.70.1 enforces at least 640x480**. Its shipped
+`usr/share/corsix-th/Lua/app.lua` defines `App.MIN_WINDOW_WIDTH = 640`
+and `App.MIN_WINDOW_HEIGHT = 480`, and normalises smaller config values.
+Forcing a 320x200 X11 window bypasses that host constraint and can misalign
+drawing and mouse coordinates; it is **not** a supported native test.
+The synthetic 320x200 Lua geometry tests remain useful.
+
+`scripts/native-smoke.py --assembly-navigation-check --resize-check`
+now uses real XTest overview clicks and wheel input at 640x480, supported
+800x600 resizing, and Pillow to verify the amber focus marker moves where
+the clicks indicate. It rejects unsupported startup sizes. The overview
+naturally disappears when the entire 792px ECG strip fits an 800px viewport.
+See `docs/NATIVE_INPUT_AND_RESIZE.md` for the diagnostic and commands.
+The GitHub Actions workflow remains `workflow_dispatch` only.

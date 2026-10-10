@@ -116,7 +116,7 @@ CorsixTH/corsix-th
 /result*
 
 .local-test-assets/
-.local-native/
+.local-native*/
 # Tester-only private CorsixTH game data and binary bundles
 /ThemeHospitalData.7z
 /LEVEL.L1

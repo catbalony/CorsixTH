@@ -41,17 +41,18 @@ viewer Lua event handlers at 640x480 and 320x200.
 
 `scripts/native-smoke.py --assembly-navigation-check` sends genuine X11
 Home/End/PageUp/PageDown keystrokes and mouse clicks to a 640x480 running
-CorsixTH 0.70.1 window. It validates distinct screenshots from a fresh
-directory and the game's error log. `--resize-check` additionally forces
-320x200 and back and validates the exported PNG dimensions.
+CorsixTH 0.70.1 window. It validates which component is active in **fresh real SDL captures** using
+the exact amber focus-marker colour, instead of accepting mere differences
+between screenshot files. Mousewheel-down changes the active component
+exactly as the K key does. `--resize-check` exercises **800x600** and
+**640x480**, both supported window sizes.
 
-**Known native compact mouse limitation:** With the smoke test's forced
-`XResizeWindow` resize to 320x200, CorsixTH can draw into only part of the
-resized surface; physical cursor positions did not reliably hit controls.
-**Do not claim a verified 320x200 native mouse interaction test.** This is
-currently covered with mocked Lua events, while native compact rendering
-is separately checked. A window-manager resize acceptance test remains
-outstanding.
+**v13 root-cause correction:** CorsixTH 0.70.1 itself imposes a **640x480
+minimum window** in `Lua/app.lua`. The earlier 320x200 forced X11 resize
+bypassed this limit and caused cropped rendering and unreliable clicks; it
+was not a supported native mouse acceptance test. Synthetic Lua geometry
+tests still intentionally cover 320x200. See
+`docs/NATIVE_INPUT_AND_RESIZE.md` for source references and reproduction.
 
 ## Lua multi-return pitfall
 
