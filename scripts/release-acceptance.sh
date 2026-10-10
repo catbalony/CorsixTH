@@ -11,6 +11,7 @@ mkdir -p "$report_root"
 report_root="$(cd "$report_root" && pwd)"
 report="$report_root/acceptance.md"
 commit="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 printf '# Sprite Viewer release acceptance\n\nBranch commit: `%s`\n\n' "$commit" > "$report"
 printf '| Check | Result | Log |\n| --- | --- | --- |\n' >> "$report"
 failures=0
@@ -44,8 +45,16 @@ if [[ "${VERIFY_ASSET_HASHES:-1}" == 1 ]]; then
   fi
 fi
 
-if ! command -v python3 >/dev/null || ! command -v Xvfb >/dev/null; then
-  echo 'Missing required python3/Xvfb' >&2
+if [[ "$branch" != "feature/sprite-viewer-engineering" ]]; then
+  record 'Engineering branch' 'FAIL (wrong branch)' "$report"
+elif ! git diff --quiet || ! git diff --cached --quiet; then
+  record 'Engineering checkout' 'FAIL (tracked edits)' "$report"
+else
+  record 'Engineering checkout' PASS "$report"
+fi
+
+if ! command -v python3 >/dev/null || ! command -v Xvfb >/dev/null || ! command -v timeout >/dev/null; then
+  echo 'Missing required python3/Xvfb/timeout' >&2
   record Prerequisites FAIL "$report"
 else
   record Prerequisites PASS "$report"
@@ -68,7 +77,7 @@ run_native() {
   if [[ ! -f "$appimage" || ! -f "$level" || ! -d "$game_data/DATA" ]]; then
     record "Native $name" 'SKIPPED (inputs missing)' "$log"; return
   fi
-  if python3 scripts/native-smoke.py --appimage "$appimage" \
+  if timeout "${NATIVE_TIMEOUT:-300}s" python3 scripts/native-smoke.py --appimage "$appimage" \
      --game-data "$game_data" --level "$level" \
      --workdir "$report_root/native-$name" "$@" >"$log" 2>&1; then
     record "Native $name" PASS "$log"
