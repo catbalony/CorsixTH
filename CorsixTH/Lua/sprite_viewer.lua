@@ -945,8 +945,11 @@ end
 
 local function DoKeyUp(_, rawchar)
   local key = rawchar:lower()
-  if key == "q" then CancelAssemblyDrag() end
-  if key == "q" then
+  -- Q is an exit shortcut only outside text-entry and help overlays.
+  -- Otherwise typing 'q' into table/palette search closes the whole viewer
+  -- on key release, even though keydown correctly edits the search query.
+  if key == "q" and not (browser_kind or help_open or jump_mode) then
+    CancelAssemblyDrag()
     TheApp.eventHandlers = old_event_handlers
     sprite_viewer_gfx_cache = gfx.cache.tabled
     gfx.cache.tabled = old_gfx_cache
@@ -1726,6 +1729,9 @@ local function DoWindowResize()
 end
 
 local function DoActive()
+  -- Window activation changes may lose the matching mouse-up event.
+  -- Discard any in-progress preview instead of leaving an edit armed.
+  CancelAssemblyDrag()
   MarkDirty()
   return false
 end
