@@ -95,3 +95,16 @@ Run the local Lua suite and repeat the **native** AppImage test with
 `--resize-check --assembly-navigation-check`. The native runner checks the
 actual `.svr`, `.bak1` and `.bak2` files to independently prove Undo/Redo
 mouse and keyboard actions. The GitHub Actions workflow remains manual-only.
+
+## v16 — direct composite picking
+
+The assembly composite uses `Layout.assembly_rects` for **both drawing and
+hit-testing**, and `Layout.assembly_pick` walks overlapping layers in reverse
+paint order. Normal click focuses the frontmost sprite; Shift+click cycles
+through intersecting sprite rectangles without touching the checked selection,
+undo/redo history or game assets. Strip copies are one component. This is
+**bounding-box** selection, not alpha-aware picking; the existing CorsixTH
+sprite API offers no opacity mask. Keep footer/header/action hit regions ahead
+of preview hits. See `docs/ASSEMBLY_PREVIEW_PICKING.md`. Run the real AppImage
+with `--assembly-pick-check` to verify native focus-marker pixels. Do not
+commit game screenshots. GitHub Actions remains manual-only.
