@@ -114,3 +114,10 @@ CorsixTH/corsix-th
 # Nix
 *.so
 /result*
+
+.local-test-assets/
+.local-native/
+# Tester-only private CorsixTH game data and binary bundles
+/ThemeHospitalData.7z
+/LEVEL.L1
+/CorsixTH-v*-x86_64.AppImage
