@@ -1,19 +1,10 @@
-name: Sprite viewer Lua tests
+name: Sprite viewer Lua tests (manual)
 
+# Free-plan Actions minutes are limited. Do not execute this workflow on pushes
+# or pull requests; maintainers run scripts/run-sprite-viewer-tests.sh locally.
+# The Actions run is opt-in for a deliberate remote diagnostic.
 on:
-  push:
-    branches: [feature/sprite-viewer-engineering]
-    paths:
-      - 'CorsixTH/Lua/sprite_viewer*.lua'
-      - 'tests/sprite_viewer/**'
-      - 'scripts/run-sprite-viewer-tests.sh'
-      - '.github/workflows/sprite-viewer-tests.yml'
-  pull_request:
-    paths:
-      - 'CorsixTH/Lua/sprite_viewer*.lua'
-      - 'tests/sprite_viewer/**'
-      - 'scripts/run-sprite-viewer-tests.sh'
-      - '.github/workflows/sprite-viewer-tests.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
