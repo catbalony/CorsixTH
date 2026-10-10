@@ -17,3 +17,4 @@ fi
 "${runner[@]}" tests/sprite_viewer/test_virtual_sheet.lua
 "${runner[@]}" tests/sprite_viewer/test_virtual_viewer.lua
 "${runner[@]}" tests/sprite_viewer/test_compact_recovery.lua
+"${runner[@]}" tests/sprite_viewer/test_visual_hierarchy.lua

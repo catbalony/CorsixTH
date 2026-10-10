@@ -34,3 +34,28 @@ assert(centre.pan_x == 0 and centre.x == 260 and centre.y > 56)
 local narrow = Layout.assembly_placement(320,200,56,2,0,0,640,48,'strip',-200)
 assert(narrow.scale == 1 and narrow.pan_min == -320 and narrow.pan_x == -200)
 print('PASS: contact-sheet wrap, scrolling bounds, negative layer offsets, pan & fit at 640/320')
+
+-- Selecting a component from the assembly list should reveal its original
+-- pixels without changing the saved offsets or the user's composition.
+do
+  local row = {}
+  for id=1,9 do row[#row+1]={id=id,repeat_count=1,dx=0,dy=0} end
+  local function width(_) return 88 end
+  assert(Layout.reveal_strip(row,width,9,640,1,0)==-152,
+    'last segment of 792px strip should be brought into view')
+  assert(Layout.reveal_strip(row,width,1,640,1,-152)==0,
+    'first segment should restore left side of strip')
+  assert(Layout.reveal_strip(row,width,5,640,1,0)==0,
+    'visible segment must not cause jumping')
+  assert(Layout.reveal_strip(row,width,9,320,1,0)==-472,
+    'narrow viewport must make last segment visible')
+  assert(Layout.reveal_strip(row,width,7,320,1,-472)==-472,
+    'already visible component must retain pan')
+  assert(Layout.reveal_strip(row,width,100,320,1,-472)==-472,
+    'unknown focus must not change the pan')
+  local repeated={{id=2,repeat_count=9}}
+  assert(Layout.reveal_strip(repeated,width,2,320,1,0)==0,
+    'oversized single component should align its left edge')
+  assert(row[9].dx==0 and row[9].dy==0 and row[9].repeat_count==1,
+    'reveal operation must not edit model values')
+end
