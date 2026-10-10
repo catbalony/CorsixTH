@@ -20,4 +20,5 @@ fi
 "${runner[@]}" tests/sprite_viewer/test_visual_hierarchy.lua
 "${runner[@]}" tests/sprite_viewer/test_assembly_navigation.lua
 "${runner[@]}" tests/sprite_viewer/test_assembly_editing.lua
+"${runner[@]}" tests/sprite_viewer/test_preview_picking.lua
 "${runner[@]}" tests/sprite_viewer/test_history.lua
