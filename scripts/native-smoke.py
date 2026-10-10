@@ -25,6 +25,14 @@ def require(cond: bool, message: str) -> None:
 
 def prepare(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     here = Path(__file__).resolve().parent.parent
+    require(args.initial_width >= 640 and args.initial_height >= 480,
+            'CorsixTH 0.70.1 requires at least 640x480; smaller window sizes are unsupported')
+    # PANEL04V frames #1..#9 form a 792px strip. At 800px no overview is
+    # needed, so there is nothing to hit-test until we resize to 640px.
+    if args.assembly_navigation_check and not args.resize_check:
+        require(args.initial_width < 792,
+                'PANEL04V overview is hidden at >=792px; use --resize-check '
+                'to test overview clicks after returning to a 640px viewport')
     root = args.workdir.resolve()
     root.mkdir(parents=True, exist_ok=True)
     extracted = root / 'appimage' / 'squashfs-root'
@@ -65,7 +73,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     config = root / 'config.txt'
     config.write_text('\n'.join([
         '-- Private native sprite-viewer smoke test; generated automatically',
-        'fullscreen = false', 'width = 640', 'height = 480', 'ui_scale = 1',
+        'fullscreen = false', f'width = {args.initial_width}', f'height = {args.initial_height}', 'ui_scale = 1',
         'language = [[english]]', 'debug = true',
         'play_sounds = false', 'play_music = false', 'play_announcements = false',
         f'theme_hospital_install = [[{game}]]',
@@ -148,6 +156,36 @@ class XInputs:
                 'Cannot resolve CorsixTH X11 window origin')
         return int(left.group(1)), int(top.group(1))
 
+    def scroll(self, direction: int) -> None:
+        # XTest buttons 4/5 are actual X11 wheel events received by SDL3.
+        require(direction in (-1, 1), 'Wheel direction must be -1 or 1')
+        button = 4 if direction > 0 else 5
+        self.xtest.XTestFakeButtonEvent(self.d, button, 1, 0)
+        self.x11.XFlush(self.d)
+        time.sleep(.08)
+        self.xtest.XTestFakeButtonEvent(self.d, button, 0, 0)
+        self.x11.XFlush(self.d)
+        time.sleep(.15)
+
+    def window_size(self) -> tuple[int, int]:
+        listing = subprocess.run(['xwininfo', '-root', '-tree'],
+                                 capture_output=True, text=True, check=True).stdout
+        found = re.search(r'(0x[0-9a-fA-F]+) "CorsixTH"', listing)
+        require(found is not None, 'CorsixTH window not found in X11 tree')
+        info = subprocess.run(['xwininfo', '-id', found.group(1)],
+                              capture_output=True, text=True, check=True).stdout
+        w = re.search(r'Width:\s*(\d+)', info)
+        h = re.search(r'Height:\s*(\d+)', info)
+        require(w is not None and h is not None, 'Cannot determine CorsixTH window dimensions')
+        return int(w.group(1)), int(h.group(1))
+
+    def click_window(self, x: int, y: int) -> None:
+        width, height = self.window_size()
+        require(0 <= x < width and 0 <= y < height,
+                f'Click outside CorsixTH window {width}x{height}: ({x}, {y})')
+        root_x, root_y = self.window_origin()
+        self.click(root_x + x, root_y + y)
+
     def click(self, x: int, y: int) -> None:
         self.xtest.XTestFakeMotionEvent(self.d, -1, x, y, 0)
         self.x11.XFlush(self.d)
@@ -187,7 +225,11 @@ def run(args: argparse.Namespace) -> None:
             os.environ['DISPLAY'] = display_id
             try:
                 x = XInputs()
-                x.click(480, 180)  # activate main window in centered 640x480 area
+                actual_w, actual_h = x.window_size()
+                require(actual_w == args.initial_width and actual_h == args.initial_height,
+                        f'Native window size differs from requested {args.initial_width}x{args.initial_height}: '
+                        f'{actual_w}x{actual_h}')
+                x.click_window(actual_w // 2, min(150, actual_h // 2))
                 x.key('d', 'Shift_L')
                 time.sleep(.55)
                 for ch in ('slash', 'p', 'a', 'n', 'e', 'l', '0', '4'):
@@ -196,13 +238,18 @@ def run(args: argparse.Namespace) -> None:
                 x.key('g'); x.key('1'); x.key('Return')
                 for _ in range(8): x.key('k', 'Shift_L')
                 if args.resize_check:
-                    # Exercise sheet reflow, not just assembly viewport sizing.
-                    x.resize_window(320, 200)
+                    # CorsixTH 0.70.1 enforces 640x480 minimum in app.lua.
+                    # Exercising a forced 320x200 bypasses that contract and
+                    # produces cropped drawing / mismatched mouse coordinates.
+                    # Resize to a genuinely supported larger window instead.
+                    x.resize_window(800, 600)
+                    require(x.window_size() == (800, 600), 'X11 resize did not take effect')
                     x.key('x')
                     x.resize_window(640, 480)
+                    require(x.window_size() == (640, 480), 'Could not restore window size')
                 x.key('v')
                 if args.assembly_navigation_check:
-                    # Nine original ECG panels exceed a 640-pixel viewport.
+                    # Nine original ECG panels exceed the baseline viewport.
                     # Verify keyboard page transitions and hit-test the real
                     # proportional overview at the bottom of the SDL window.
                     x.key('x')  # focus initially on #9
@@ -210,15 +257,39 @@ def run(args: argparse.Namespace) -> None:
                     x.key('End'); x.key('x')
                     x.key('Page_Up'); x.key('x')
                     x.key('Page_Down'); x.key('x')
-                    root_x, root_y = x.window_origin()
-                    x.click(root_x + 12, root_y + 438)
+                    # Verify *which* component was selected by looking for
+                    # the warm focus marker in the real PNG, not merely by
+                    # counting how many screenshots were generated.
+                    def capture_overview_click(relative_x: int, height: int) -> Path:
+                        before = set(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png'))
+                        x.click_window(relative_x, height - 42)
+                        x.key('x')
+                        time.sleep(.2)
+                        after = set(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png'))
+                        generated = after - before
+                        require(len(generated) == 1,
+                                f'Expected one fresh SDL screenshot, got {len(generated)}')
+                        return generated.pop()
+                    baseline_width = 640 if args.resize_check else args.initial_width
+                    baseline_height = 480 if args.resize_check else args.initial_height
+                    first_overview = capture_overview_click(12, baseline_height)
+                    before = set(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png'))
+                    x.scroll(-1)  # wheel down = next component, matching K
                     x.key('x')
-                    x.click(root_x + 628, root_y + 438)
-                    x.key('x')
+                    time.sleep(.2)
+                    new_wheel = set(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png')) - before
+                    require(len(new_wheel) == 1, 'Wheel movement capture missing')
+                    next_overview = new_wheel.pop()
+                    last_overview = capture_overview_click(baseline_width - 12, baseline_height)
                 if args.resize_check:
-                    x.resize_window(320, 200)
+                    x.resize_window(800, 600)
+                    require(x.window_size() == (800, 600), 'Assembly resize failed')
                     x.key('x')
+                    if args.assembly_navigation_check:
+                        first_overview_big = capture_overview_click(12, 600)
+                        last_overview_big = capture_overview_click(788, 600)
                     x.resize_window(640, 480)
+                    require(x.window_size() == (640, 480), 'Assembly restore failed')
                 x.key('s', 'Control_L')
                 x.key('x')
                 time.sleep(.7)
@@ -260,14 +331,49 @@ def run(args: argparse.Namespace) -> None:
         dimensions.add((int.from_bytes(data[16:20], 'big'),
                         int.from_bytes(data[20:24], 'big')))
     if args.resize_check:
-        require((320, 200) in dimensions and (640, 480) in dimensions,
-                f'Native screenshots do not reflect SDL resizing: {dimensions}')
+        require((800, 600) in dimensions and (640, 480) in dimensions,
+                f'Native screenshots do not reflect supported SDL resizing: {dimensions}')
     if args.assembly_navigation_check:
-        import hashlib
-        unique = {hashlib.sha256(png.read_bytes()).digest() for png in captured}
-        require(len(captured) >= 7 and len(unique) >= 4,
-                f'Assembly navigation did not produce distinct native frames: '
-                f'{len(unique)} distinct / {len(captured)} captures')
+        try:
+            from PIL import Image
+        except ImportError as ex:
+            raise RuntimeError('Native overview assertions require Pillow (python3-pil)') from ex
+
+        def marker_center(png: Path) -> tuple[int, int]:
+            with Image.open(png) as raw:
+                im = raw.convert('RGB')
+                # SDL's logical drawing size and the X11 window's physical
+                # pixel size can differ slightly immediately after a resize.
+                # Find the 7-pixel-high focus marker near the bottom of the
+                # screenshot rather than assuming a single absolute y row.
+                target = (226, 180, 100)
+                pixels = im.load()
+                marker_rows = []
+                for y in range(max(0, im.height - 85), im.height - 10):
+                    xs = [x for x in range(8, im.width - 8)
+                          if pixels[x, y] == target]
+                    if xs:
+                        marker_rows.append(xs)
+                require(marker_rows, f'No assembly-focus marker: {png}')
+                marked = max(marker_rows, key=len)
+                return (min(marked) + max(marked)) // 2, im.width
+
+        def verify_clicks(left: Path, right: Path) -> None:
+            left_x, width = marker_center(left)
+            right_x, right_width = marker_center(right)
+            require(width == right_width, 'Overview captures have different sizes')
+            require(left_x < width // 4 and right_x > width * 3 // 4,
+                    f'Real X11 overview clicks did not select opposite ends: '
+                    f'{left_x} and {right_x} / {width}')
+        verify_clicks(first_overview, last_overview)
+        focus_first, image_width = marker_center(first_overview)
+        focus_second, _ = marker_center(next_overview)
+        focus_last, _ = marker_center(last_overview)
+        require(focus_first < focus_second < focus_last,
+                f'Wheel down did not navigate to the next component: '
+                f'{focus_first} -> {focus_second} -> {focus_last} / {image_width}')
+        if args.resize_check:
+            verify_clicks(first_overview_big, last_overview_big)
     print(f'PASS: real CorsixTH SDL launch, search, range select, 9-frame recipe, screenshot, animation & clean exit')
     print(f'  log: {logfile}\n  recipe: {recipe}\n  native PNGs: {len(captured)}')
 
@@ -279,8 +385,10 @@ def main() -> None:
     p.add_argument('--level', type=Path, required=True, help='tester-provided LEVEL.L1')
     p.add_argument('--workdir', type=Path, default=Path('.local-native'), help='gitignored temp native test root')
     p.add_argument('--display', default=None, help='Xvfb display, default :147')
+    p.add_argument('--initial-width', type=int, default=640)
+    p.add_argument('--initial-height', type=int, default=480)
     p.add_argument('--boot-delay', type=float, default=3.5)
-    p.add_argument('--resize-check', action='store_true', help='verify real SDL X11 320x200/640x480 resize and screenshots')
+    p.add_argument('--resize-check', action='store_true', help='verify supported real SDL X11 800x600/640x480 resize and screenshots')
     p.add_argument('--assembly-navigation-check', action='store_true',
                    help='exercise stable assembly pages and click the overview in real X11')
     args = p.parse_args()
