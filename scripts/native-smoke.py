@@ -62,7 +62,8 @@ def prepare(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         shutil.copytree(extracted / 'usr/share/corsix-th/Lua', lua_root)
     for module in ('sprite_viewer.lua', 'sprite_viewer_recipe.lua',
                    'sprite_viewer_browser.lua', 'sprite_viewer_selection.lua',
-                   'sprite_viewer_layout.lua', 'sprite_viewer_assembly.lua'):
+                   'sprite_viewer_layout.lua', 'sprite_viewer_assembly.lua',
+                   'sprite_viewer_history.lua'):
         shutil.copy2(here / 'CorsixTH/Lua' / module, lua_root / module)
     (lua_root / 'debug_script.lua').write_text('corsixth.require("sprite_viewer")()\n')
     # Each invocation gets a fresh output directory. Never accept stale PNGs or
@@ -290,23 +291,64 @@ def run(args: argparse.Namespace) -> None:
                         last_overview_big = capture_overview_click(788, 600)
                     x.resize_window(640, 480)
                     require(x.window_size() == (640, 480), 'Assembly restore failed')
+                def assembly_button(action: str, mode: str) -> None:
+                    # Layout.assembly_controls is based on the visible canvas
+                    # width, not constant coordinates from an earlier release.
+                    strip = ['move-left', 'move-right', 'copy-minus', 'copy-plus',
+                             'reset', 'undo', 'redo']
+                    layers = ['move-left', 'move-right', 'dx-minus', 'dx-plus',
+                              'dy-minus', 'dy-plus', 'reset', 'undo', 'redo']
+                    actions = strip if mode == 'strip' else layers
+                    index = actions.index(action)
+                    width, height = x.window_size()
+                    gap = 5
+                    bw = max(1, min(92, (max(1, width - 16) - gap * (len(actions) - 1)) // len(actions)))
+                    total = bw * len(actions) + gap * (len(actions) - 1)
+                    cx = (width - total) // 2 + index * (bw + gap) + bw // 2
+                    x.click_window(cx, height - 93)
                 if args.assembly_edit_check:
                     # 640x480 toolbar positions, calculated by Layout.assembly_controls.
                     # The edited values are verified from the *real* saved SVR1
                     # file, not merely by looking for button labels in a PNG.
                     require(x.window_size() == (640, 480),
                             'edit controls require the baseline 640x480 viewport')
-                    x.click_window(126, 387)  # focused #9: Order <
-                    x.click_window(417, 387)  # Copies +, from 1 to 2
+                    assembly_button('move-left', 'strip')  # focused #9: Order <
+                    assembly_button('copy-plus', 'strip')  # Copies +, from 1 to 2
                     x.key('x')                 # strip editor screenshot
                     x.key('m')                 # enter layers
                     shift = x.code('Shift_L')
                     x.down(shift)
-                    try: x.click_window(320, 387)  # X +, Shift = 8 px
+                    try: assembly_button('dx-plus', 'layers')  # X +, Shift = 8 px
                     finally: x.up(shift)
-                    x.click_window(500, 387) # Y +, 1 px
+                    assembly_button('dy-plus', 'layers') # Y +, 1 px
                     x.key('x')                # layer editor screenshot
                     x.key('m')                # strip, preserve hidden offsets
+                    if args.assembly_history_check:
+                        # Undo the four real mouse actions: Y+, Shift X+,
+                        # Copies+ and Order<, then SAVE that base state.
+                        for _ in range(4): x.key('z', 'Control_L')
+                        x.key('s', 'Control_L')
+                        x.key('x')
+                        # Redo using both keyboard conventions and actual
+                        # clickable toolbar buttons; save once more. The
+                        # backup must contain the complete *undone* recipe.
+                        for _ in range(2): x.key('y', 'Control_L')
+                        shift = x.code('Shift_L')
+                        x.down(shift)
+                        try:
+                            for _ in range(2): x.key('z', 'Control_L')
+                        finally:
+                            x.up(shift)
+                        assembly_button('undo', 'strip')
+                        # Save the intermediate mouse-undo state. Overwrite
+                        # creates .bak1 (fully undone base state).
+                        x.key('s', 'Control_L')  # request overwrite
+                        x.key('s', 'Control_L')  # commit intermediate state
+                        assembly_button('redo', 'strip')
+                        # Overwrite again: .bak2 must contain the state with
+                        # dy=0, demonstrating native clicked Undo/Redo.
+                        x.key('s', 'Control_L')
+                        x.key('s', 'Control_L')
                 x.key('s', 'Control_L')
                 x.key('x')
                 time.sleep(.7)
@@ -349,6 +391,23 @@ def run(args: argparse.Namespace) -> None:
     else:
         require([int(line.split('\t')[0]) for line in lines[1:]] == list(range(1, 10)),
                 f'native shift-selection did not select ECG frames 1..9: {lines}')
+    if args.assembly_history_check:
+        backups = sorted(screenshots.glob('SpriteViewer_Data_PANEL04V.svr.bak*'))
+        require(len(backups) == 2, f'Undo/redo intermediate backups missing: {backups}')
+        backup_lines = backups[0].read_text().strip().splitlines()
+        require(backup_lines[0] == 'SVR1\tData\tPANEL04V\tcomplex\tstrip',
+                'Undo recipe header corrupted')
+        base_items = [line.split('\t') for line in backup_lines[1:]]
+        require([int(fields[0]) for fields in base_items] == list(range(1,10)),
+                f'Undo did not restore original checked order: {base_items}')
+        require(all(fields[1:] == ['0','0','1'] for fields in base_items),
+                f'Undo did not restore original offsets/copies: {base_items}')
+        intermediate = backups[1].read_text().strip().splitlines()
+        require([int(line.split('\t')[0]) for line in intermediate[1:]] ==
+                [1,2,3,4,5,6,7,9,8],
+                'Native mouse Undo unexpectedly changed the component order')
+        require(intermediate[8].split('\t') == ['9','8','0','2'],
+                f'Native mouse Undo did not revert Y offset: {intermediate[8]}')
     captured = list(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png'))
     require(captured, 'native SDL screenshot missing')
     dimensions = set()
@@ -420,7 +479,11 @@ def main() -> None:
                    help='exercise stable assembly pages and click the overview in real X11')
     p.add_argument('--assembly-edit-check', action='store_true',
                    help='edit copies, order and layer offsets using real SDL mouse events')
+    p.add_argument('--assembly-history-check', action='store_true',
+                   help='undo/redo native assembly edits, assert saved backup/final recipes')
     args = p.parse_args()
+    if args.assembly_history_check and not args.assembly_edit_check:
+        p.error('--assembly-history-check requires --assembly-edit-check')
     try: run(args)
     except Exception as ex:
         print(f'FAIL: {ex}', file=sys.stderr)

@@ -33,7 +33,7 @@ assert(not Assembly.apply(items,404,'copy-plus'))
 for _,mode in ipairs({'strip','layers'}) do
   for _,width in ipairs({320,640,800}) do
     local boxes=Layout.assembly_controls(width,480,mode)
-    assert(#boxes==(mode=='strip' and 5 or 7))
+    assert(#boxes==(mode=='strip' and 7 or 9))
     local last=-1
     for _,box in ipairs(boxes) do
       assert(box.x>=0 and box.x+box.w<=width)
@@ -125,5 +125,24 @@ assert(not click_action('strip','move-right'), 'last component right button must
 -- Editing shortcuts must not mutate an assembly while back in gallery.
 key('v');key(',');key('r');key('v');render()
 assert(draw_order()=='1,2,3')
+-- New edits are tracked and may be undone by keyboard or clicked controls.
+assert(click_action('strip','copy-plus'));render()
+assert(draw_order()=='1,2,3,3' and has('history '))
+key('z',{ctrl=true});render();assert(draw_order()=='1,2,3')
+assert(click_action('strip','redo'));render();assert(draw_order()=='1,2,3,3')
+key('z',{ctrl=true});render();assert(draw_order()=='1,2,3')
+key('z',{ctrl=true,shift=true});render() -- standard redo alternative
+assert(draw_order()=='1,2,3,3')
+assert(click_action('strip','undo'));render();assert(draw_order()=='1,2,3')
+key('y',{ctrl=true});render();assert(draw_order()=='1,2,3,3')
+key('z',{ctrl=true});render();assert(draw_order()=='1,2,3')
+assert(click_action('strip','move-left'));render();assert(draw_order()=='1,3,2')
+assert(not click_action('strip','redo'), 'a new edit must invalidate redo')
+-- Switch view without mutating selection; Ctrl+Z must not change anything.
+key('v');key('z',{ctrl=true});key('v');render()
+assert(draw_order()=='1,3,2')
+-- Changing checked membership resets history, preventing resurrection.
+key('v');key('space');key('v');render()
+assert(not click_action('strip','undo'), 'checking a new sprite must discard stale history')
 handlers.keyup(nil,'q');assert(TheApp.eventHandlers==original)
 print('PASS: bounded assembly model and keyboard/mouse edit parity, button layout, Shift+nudge, disabled actions')
