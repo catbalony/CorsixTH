@@ -15,10 +15,13 @@ review, documentation and handoff. Stop there, barring release blockers.
   mouse release. Any pending layer drag is now cancelled/restored on activation
   changes, without adding an undo record. This supplements the existing Esc,
   view-change and resize cancellations.
+- **Wheel during drag:** scrolling to a different focused layer now cancels
+  the uncommitted preview before changing focus. A late mouse-up cannot
+  accidentally commit a drag for a layer that is no longer selected.
 
-The existing `tests/sprite_viewer/test_drag.lua` now exercises these two
+The existing `tests/sprite_viewer/test_drag.lua` now exercises these three
 regressions through the viewer event handlers, including unchanged history,
-discarded mouse release and continued Q-to-exit outside overlays.
+discarded mouse release, safe wheel navigation and continued Q-to-exit outside overlays.
 
 ## Verification status
 
