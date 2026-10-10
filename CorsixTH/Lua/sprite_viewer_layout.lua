@@ -102,6 +102,95 @@ function Layout.assembly_placement(sw, sh, header_height, zoom,
           pan_x = pan, pan_min = pan_min, x = x, y = y}
 end
 
+-- Pages remain stable as focus moves within a page; the component chips do
+-- not jump around on every J/K keypress. Both click arrows and PageUp/Down
+-- navigate to the first component of the adjacent page.
+function Layout.assembly_page(index, count, capacity)
+  if count <= 0 then return 1, 0, 0, 0 end
+  capacity = math.max(1, math.floor(capacity))
+  index = math.max(1, math.min(count, index))
+  local page = math.floor((index - 1) / capacity) + 1
+  local first = (page - 1) * capacity + 1
+  return first, math.min(count, first + capacity - 1), page,
+    math.ceil(count / capacity)
+end
+
+function Layout.assembly_page_target(index, count, capacity, direction)
+  if count <= 0 then return nil end
+  local first = Layout.assembly_page(index, count, capacity)
+  return math.max(1, math.min(count, first + direction * math.max(1, math.floor(capacity))))
+end
+
+-- Shared source-space geometry for the narrow overview beneath a long
+-- strip. Repeat counts contribute to width, while layer offsets do not.
+local function StripExtent(items, size_of, active_index)
+  local cursor, focus_start, focus_end = 0, 0, 0
+  for index, item in ipairs(items) do
+    local w = size_of(item.id)
+    local span = math.max(0, w) * item.repeat_count
+    if index == active_index then
+      focus_start, focus_end = cursor, cursor + span
+    end
+    cursor = cursor + span
+  end
+  return cursor, focus_start, focus_end
+end
+
+-- Overview units are screen pixels. Return nil for a strip that already fits,
+-- since a click target and a viewport marker would provide no navigation.
+function Layout.strip_overview(items, size_of, active_index,
+                               viewport_width, zoom, pan, bar_x, bar_width)
+  if bar_width <= 0 or #items == 0 then return nil end
+  local total, first, last = StripExtent(items, size_of, active_index)
+  local screen_total = total * zoom
+  if screen_total <= viewport_width or screen_total <= 0 then return nil end
+  local function bar_position(px)
+    local fraction = math.max(0, math.min(1, px / screen_total))
+    return bar_x + math.floor(fraction * bar_width)
+  end
+  local vis_left = bar_position(-pan)
+  local vis_right = bar_position(-pan + viewport_width)
+  local focus_left = math.min(bar_x + bar_width - 1,
+    bar_position(first * zoom))
+  local focus_right = math.min(bar_x + bar_width,
+    math.max(focus_left + 2, bar_position(last * zoom)))
+  return {x = bar_x, width = bar_width,
+    view_x = vis_left, view_width = math.max(1, vis_right - vis_left),
+    focus_x = focus_left, focus_width = math.max(1, focus_right - focus_left)}
+end
+
+-- Click-to-locate uses source pixel width, NOT sprite count. This matches the
+-- overview's proportional rendering even with long repeated segments.
+function Layout.strip_pick(items, size_of, click_x, bar_x, bar_width)
+  if bar_width <= 0 or #items == 0 then return nil end
+  local total = StripExtent(items, size_of)
+  if total <= 0 then return nil end
+  local fraction = math.max(0, math.min(1,
+    (click_x - bar_x + 0.5) / bar_width))
+  local target, cursor = fraction * total, 0
+  for index, item in ipairs(items) do
+    -- size_of returns width AND height. Capture width before math.max: if the
+    -- call is the final argument, Lua expands both results and taller sprites
+    -- incorrectly occupy extra space in the overview hit map.
+    local width = size_of(item.id)
+    cursor = cursor + math.max(0, width) * item.repeat_count
+    if target < cursor then return index end
+  end
+  return #items
+end
+
+-- Overview clicks deliberately centre the chosen component. Keyboard J/K
+-- retains minimal-motion reveal, so ordinary stepping does not jump around.
+function Layout.center_strip(items, size_of, active_index, viewport_width, zoom)
+  local total, first, last = StripExtent(items, size_of, active_index)
+  if total <= 0 then return 0 end
+  local min_pan = math.min(0, viewport_width - total * zoom)
+  local span = (last - first) * zoom
+  local target = span > viewport_width and -first * zoom or
+    math.floor(viewport_width / 2 - (first + last) * zoom / 2)
+  return math.max(min_pan, math.min(0, target))
+end
+
 -- Keep an explicitly focused component visible while keyboard/click browsing.
 -- The strip can be wider than the viewport; positioning its source artwork is
 -- never changed, only the viewport pan.  On entering assembly the focused

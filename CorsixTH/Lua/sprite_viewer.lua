@@ -278,13 +278,24 @@ local function RevealFocusedStrip()
     focus_id, sw, placement.scale, assembly_pan_x)
 end
 
-local function FocusSelected(direction)
-  if #selected == 0 then return end
-  local index = (IndexOf(focus_id) or 1)
-  index = (index - 1 + direction + #selected) % #selected + 1
-  focus_id = selected[index].id
+local function FocusAssemblyIndex(index)
+  local item = selected[index]
+  if not item then return end
+  focus_id = item.id
   RevealFocusedStrip()
   MarkDirty()
+end
+
+local function FocusSelected(direction)
+  if #selected == 0 then return end
+  local index = IndexOf(focus_id) or 1
+  index = (index - 1 + direction + #selected) % #selected + 1
+  FocusAssemblyIndex(index)
+end
+
+local function AssemblyPageCapacity()
+  local width = GetViewerSize(TheApp.video)
+  return math.max(1, math.floor((width - 40) / (width < 520 and 56 or 70)))
 end
 
 for _, dir in ipairs({"Data", "QData", "DataM", "QDataM"}) do
@@ -773,6 +784,20 @@ local function DoKey(_, rawchar, modifiers)
     else
       ToggleSelection(focus_id)
     end
+  elseif view_mode == "assembly" and #selected > 0 and
+      (key == "home" or key == "end" or key == "pageup" or
+       key == "page up" or key == "pagedown" or key == "page down") then
+    local index
+    if key == "home" then
+      index = 1
+    elseif key == "end" then
+      index = #selected
+    else
+      local direction = (key == "pageup" or key == "page up") and -1 or 1
+      index = Layout.assembly_page_target(IndexOf(focus_id) or 1,
+        #selected, AssemblyPageCapacity(), direction)
+    end
+    FocusAssemblyIndex(index)
   elseif key == "home" and view_mode == "sheet" then
     y_off = 0
     MarkDirty()
@@ -807,6 +832,7 @@ local function DoKey(_, rawchar, modifiers)
       local to = from + ((key == "comma" or key == ",") and -1 or 1)
       if selected[to] then
         selected[from], selected[to] = selected[to], selected[from]
+        RevealFocusedStrip()
         MarkDirty()
       end
     end
@@ -884,9 +910,19 @@ local function DoMouseDown(_, button, x, y)
     if button ~= 1 then return false end
     for _, c in ipairs(assembly_hit_boxes) do
       if x >= c.x and x < c.x + c.w and y >= c.y and y < c.y + c.h then
-        focus_id = c.id
-        RevealFocusedStrip()
-        MarkDirty()
+        if c.kind == "overview" then
+          local size_of = function(id) return sprite_table:size(id) end
+          local index = Layout.strip_pick(selected, size_of, x, c.x, c.w)
+          if index then
+            focus_id = selected[index].id
+            local sw = GetViewerSize(TheApp.video)
+            assembly_pan_x = Layout.center_strip(selected, size_of, index,
+              sw, c.zoom)
+            MarkDirty()
+          end
+        else
+          FocusAssemblyIndex(c.index)
+        end
         return true
       end
     end
@@ -1065,14 +1101,14 @@ local function RenderAssembly(canvas, sw, sh)
     font:draw(canvas, "Sprite assembly", 2, 2)
     DrawFittedText(canvas, assembly_mode .. "  " .. #selected ..
       " parts   focus #" .. focus_id, 2, 29, sw - 4)
-    DrawFittedText(canvas, "J/K item  M mode  arrows pan  F1 help", 2, 42, sw - 4)
+    DrawFittedText(canvas, "J/K focus  PgUp/Dn page  F1 help", 2, 42, sw - 4)
   elseif sw < 600 then
     font:draw(canvas, "Sprite assembly", 2, 2)
     DrawFittedText(canvas, "Click item  J/K focus  M mode  F1 help", 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery", 2, 30, sw - 4)
   else
     font:draw(canvas, "Sprite assembly", 2, 2)
-    DrawFittedText(canvas, "Click item  J/K focus  M strip/layers  Arrows pan/nudge  F1 help", 2, 16, sw - 4)
+    DrawFittedText(canvas, "Click chips/overview  J/K focus  PgUp/Dn pages  M mode  F1", 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery  X capture", 2, 30, sw - 4)
   end
   if #selected == 0 then
@@ -1131,39 +1167,63 @@ local function RenderAssembly(canvas, sw, sh)
   else
     details = details .. "  offset (" .. active.dx .. "," .. active.dy .. ")"
   end
+  local _, _, page_number, page_count = Layout.assembly_page(
+    active_idx, #selected, AssemblyPageCapacity())
+  details = details .. "  page " .. page_number .. "/" .. page_count
   DrawFittedText(canvas, details, 8, sh - 59, sw - 16)
   assembly_hit_boxes = {}
   local cell_w = sw < 520 and 56 or 70
-  local visible = math.max(1, math.floor((sw - 16) / cell_w))
-  local first = math.max(1, math.min(active_idx - math.floor(visible / 2),
-                                    #selected - visible + 1))
-  local last = math.min(#selected, first + visible - 1)
+  local visible = AssemblyPageCapacity()
+  local first, last, page, pages = Layout.assembly_page(active_idx, #selected, visible)
   local grey = canvas:mapRGB(115, 115, 115)
   local ink = canvas:mapRGB(132, 199, 206)
   local dark = canvas:mapRGB(18, 18, 18)
+  -- Compact positional overview: dim track = entire assembly, muted teal =
+  -- visible viewport, warm marker = active component. Click to locate it.
+  if assembly_mode == "strip" then
+    local size_of = function(id) return sprite_table:size(id) end
+    local overview = Layout.strip_overview(selected, size_of, active_idx,
+      sw, fit, assembly_pan_x, 8, sw - 16)
+    if overview then
+      local y = sh - 45
+      canvas:drawRect(canvas:mapRGB(65, 65, 65),
+        overview.x, y, overview.width, 7)
+      canvas:drawRect(canvas:mapRGB(91, 128, 139),
+        overview.view_x, y, overview.view_width, 7)
+      canvas:drawRect(canvas:mapRGB(226, 180, 100),
+        overview.focus_x, y, overview.focus_width, 7)
+      assembly_hit_boxes[#assembly_hit_boxes + 1] =
+        {kind = "overview", x = overview.x, y = y - 3,
+         w = overview.width, h = 12, zoom = fit}
+    end
+  end
   local row_y = sh - 34
   for i = first, last do
     local item = selected[i]
-    local x = 8 + (i - first) * cell_w
+    local x = 20 + (i - first) * cell_w
     canvas:drawRect(i == active_idx and ink or grey, x, row_y, cell_w - 3, 23)
     canvas:drawRect(dark, x + 1, row_y + 1, cell_w - 5, 21)
     local label = "#" .. item.id ..
       (item.repeat_count > 1 and "x" .. item.repeat_count or "")
-    font:draw(canvas, label, x + 4, row_y + 5)
+    DrawFittedText(canvas, label, x + 4, row_y + 5, cell_w - 10)
     assembly_hit_boxes[#assembly_hit_boxes + 1] =
-      {id = item.id, x = x, y = row_y, w = cell_w - 3, h = 23}
+      {index = i, x = x, y = row_y, w = cell_w - 3, h = 23}
   end
-  if first > 1 then
-    font:draw(canvas, "<", 0, row_y + 6)
+  if page > 1 then
+    canvas:drawRect(ink, 2, row_y, 15, 23)
+    canvas:drawRect(dark, 3, row_y + 1, 13, 21)
+    font:draw(canvas, "<", 5, row_y + 5)
     assembly_hit_boxes[#assembly_hit_boxes + 1] =
-      {id = selected[math.max(1, first - visible)].id,
-       x = 0, y = row_y, w = 8, h = 23}
+      {index = Layout.assembly_page_target(active_idx, #selected, visible, -1),
+       x = 2, y = row_y, w = 15, h = 23}
   end
-  if last < #selected then
-    font:draw(canvas, ">", sw - 10, row_y + 6)
+  if page < pages then
+    canvas:drawRect(ink, sw - 17, row_y, 15, 23)
+    canvas:drawRect(dark, sw - 16, row_y + 1, 13, 21)
+    font:draw(canvas, ">", sw - 14, row_y + 5)
     assembly_hit_boxes[#assembly_hit_boxes + 1] =
-      {id = selected[math.min(#selected, last + visible)].id,
-       x = sw - 12, y = row_y, w = 12, h = 23}
+      {index = Layout.assembly_page_target(active_idx, #selected, visible, 1),
+       x = sw - 17, y = row_y, w = 15, h = 23}
   end
   if jump_mode then
     font:draw(canvas, "Repeat count: " .. jump_text .. "_  [Enter/Esc]", 8, sh - 95)
@@ -1361,6 +1421,8 @@ local function RenderHelp(canvas, sw, sh)
     "Detail:   I preview   Left/Right step   H checkerboard",
     "          Shift+arrows pan large sprites   0 recenter",
     "Assembly: V toggle   M strip/layers   ,/. reorder",
+    "          J/K focus  PgUp/Dn pages  Home/End ends",
+    "          Click overview track to seek wide strips",
     "          arrows pan or nudge   N copies   R reset",
     "Frames:   T toggle   Space play   Left/Right step",
     "          [/]: FPS   L loop/once/pingpong   H align",
