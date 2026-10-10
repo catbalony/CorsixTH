@@ -31,6 +31,7 @@ local gfx = TheApp.gfx
 local SDL = rawget(_G, "SDL") or require("sdl")
 local Recipe = require("sprite_viewer_recipe")
 local Browser = require("sprite_viewer_browser")
+local Selection = require("sprite_viewer_selection")
 local font -- Set on open
 local need_draw = true
 local sprite_table_paths = {}
@@ -190,75 +191,44 @@ local function ToggleAnimationPlayback()
 end
 
 
+-- Selection model is independent of SDL rendering; the viewer owns focus,
+-- notices and animation state, while the helper owns set/list invariants.
+local MAX_BULK_SELECTION = 2048
 local function IndexOf(id)
-  for i, item in ipairs(selected) do
-    if item.id == id then return i end
-  end
+  return Selection.index(selected, id)
 end
 
 local function ToggleSelection(id)
-  local i = IndexOf(id)
-  if i then
-    table.remove(selected, i)
-    selected_lookup[id] = nil
-  else
-    selected[#selected + 1] = {id = id, dx = 0, dy = 0, repeat_count = 1}
-    selected_lookup[id] = true
-  end
-  focus_id = id
-  selection_anchor = id
-  if animation_index > #selected then animation_index = math.max(1, #selected) end
+  selected, selected_lookup = Selection.toggle(selected, selected_lookup, id)
+  focus_id, selection_anchor = id, id
+  animation_index = math.min(animation_index, math.max(1, #selected))
   MarkDirty()
 end
 
--- Shift-click adds an inclusive, numerically ordered range. Explicitly keep
--- source IDs and existing per-sprite offsets/repeats rather than duplicating
--- a checked sprite. Assembly still uses the resulting ordered selection.
 local function SelectRange(anchor, target)
-  if not anchor then anchor = target end
-  local first, last = math.min(anchor, target), math.max(anchor, target)
-  local old_by_id = {}
-  local retained = {}
-  for _, item in ipairs(selected) do
-    old_by_id[item.id] = item
-    if item.id < first or item.id > last then
-      retained[#retained + 1] = item
-    end
-  end
-  for id = first, last do
-    retained[#retained + 1] = old_by_id[id] or
-      {id = id, dx = 0, dy = 0, repeat_count = 1}
-    selected_lookup[id] = true
-  end
-  selected = retained
-  focus_id = target
-  selection_anchor = anchor
-  MarkDirty()
-end
-
--- Batch operations share the same canonical selected[] / selected_lookup model.
--- Bound the request, rather than freezing the UI on enormous sprite tables.
-local MAX_BULK_SELECTION = 2048
-local function BulkSelect(invert)
-  if #sprite_table > MAX_BULK_SELECTION then
-    notice = string.format("%d sprites: bulk selection limited to %d", #sprite_table, MAX_BULK_SELECTION)
+  anchor = anchor or target
+  local next_items, next_lookup, err = Selection.range(
+    selected, selected_lookup, anchor, target, MAX_BULK_SELECTION)
+  if not next_items then
+    notice = err
     MarkDirty()
     return
   end
-  local next_selection, lookup, old_by_id = {}, {}, {}
-  for _, item in ipairs(selected) do old_by_id[item.id] = item end
-  for id = 0, #sprite_table - 1 do
-    local existing = old_by_id[id]
-    local include = invert and not existing or not invert
-    if include then
-      next_selection[#next_selection + 1] = existing or
-        {id = id, dx = 0, dy = 0, repeat_count = 1}
-      lookup[id] = true
-    end
+  selected, selected_lookup = next_items, next_lookup
+  focus_id, selection_anchor = target, anchor
+  MarkDirty()
+end
+
+local function BulkSelect(invert)
+  local next_items, next_lookup, err = Selection.bulk(
+    selected, #sprite_table, invert, MAX_BULK_SELECTION)
+  if not next_items then
+    notice = err
+  else
+    selected, selected_lookup = next_items, next_lookup
+    animation_index = 1
+    notice = string.format("%d sprites checked", #selected)
   end
-  selected, selected_lookup = next_selection, lookup
-  animation_index = 1
-  notice = string.format("%d sprites checked", #selected)
   MarkDirty()
 end
 
@@ -272,7 +242,7 @@ end
 
 local function FocusSelected(direction)
   if #selected == 0 then return end
-  local index = IndexOf(focus_id) or 1
+  local index = (IndexOf(focus_id) or 1)
   index = (index - 1 + direction + #selected) % #selected + 1
   focus_id = selected[index].id
   MarkDirty()
@@ -353,12 +323,7 @@ local function ReLoadSameTable()
   sheet_layout_cache = nil
   -- A decoding-mode switch may change how many entries exist.
   local available = #sprite_table
-  for i = #selected, 1, -1 do
-    if selected[i].id >= available then
-      selected_lookup[selected[i].id] = nil
-      table.remove(selected, i)
-    end
-  end
+  selected, selected_lookup = Selection.prune(selected, available)
   focus_id = math.max(0, math.min(focus_id, available - 1))
   if selection_anchor and selection_anchor >= available then
     selection_anchor = nil
