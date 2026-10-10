@@ -1,0 +1,29 @@
+name: Sprite viewer Lua tests
+
+on:
+  push:
+    branches: [feature/sprite-viewer-engineering]
+    paths:
+      - 'CorsixTH/Lua/sprite_viewer*.lua'
+      - 'tests/sprite_viewer/**'
+      - 'scripts/run-sprite-viewer-tests.sh'
+      - '.github/workflows/sprite-viewer-tests.yml'
+  pull_request:
+    paths:
+      - 'CorsixTH/Lua/sprite_viewer*.lua'
+      - 'tests/sprite_viewer/**'
+      - 'scripts/run-sprite-viewer-tests.sh'
+      - '.github/workflows/sprite-viewer-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  pure-lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+      - name: Run sprite viewer helper tests
+        run: bash scripts/run-sprite-viewer-tests.sh

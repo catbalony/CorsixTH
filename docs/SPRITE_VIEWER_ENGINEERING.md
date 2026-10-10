@@ -54,3 +54,28 @@ runner has actually been run again.
 The separate Tarantino-style art experiment must not change this branch,
 merge it, or write to `master`. Changes should be scoped, reviewable, and
 backed by Lua regression + SDL tests.
+
+
+## 2026-10-10: independent selection and geometry
+
+Selection is now handled by `CorsixTH/Lua/sprite_viewer_selection.lua`. It
+preserves checked order and per-entry offsets/repetitions, prunes invalid
+entries after decoder changes, and bounds range/bulk operations to prevent
+blocking the debug viewer on unusually large tables.
+
+`CorsixTH/Lua/sprite_viewer_layout.lua` owns deterministic contact-sheet
+wrapping, scroll bounds, assembly extents, negative layer offsets, fit and
+horizontal panning. The entry-point still renders with CorsixTH's actual
+sprite API and has no additional UI chrome.
+
+The branch ships `tests/sprite_viewer/test_selection.lua`,
+`tests/sprite_viewer/test_layout.lua`, and the scoped GitHub Actions
+workflow `.github/workflows/sprite-viewer-tests.yml`.
+
+The full local development bundle additionally contains a real AppImage/Xvfb
+runner at `scripts/native-smoke.py` using the private user-supplied
+Theme Hospital assets. It was run against CorsixTH 0.70.1 and verified
+PANEL04V search, nine-frame selection, recipe creation, a PNG, playback and
+clean close. The runner uses **fresh per-run output directories** so old
+recipes/PNGs cannot make a broken run appear successful. Proprietary inputs
+and native images must not be committed to this public repository.
