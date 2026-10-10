@@ -102,4 +102,32 @@ function Layout.assembly_placement(sw, sh, header_height, zoom,
           pan_x = pan, pan_min = pan_min, x = x, y = y}
 end
 
+-- Keep an explicitly focused component visible while keyboard/click browsing.
+-- The strip can be wider than the viewport; positioning its source artwork is
+-- never changed, only the viewport pan.  On entering assembly the focused
+-- component is revealed to avoid an invisible active selection.
+function Layout.reveal_strip(items, size_of, focus_id, viewport_width, zoom, pan)
+  local x, target_start, target_end = 0, nil, nil
+  for _, item in ipairs(items) do
+    local w = size_of(item.id)
+    local span = w * item.repeat_count * zoom
+    if item.id == focus_id then
+      target_start, target_end = x, x + span
+    end
+    x = x + span
+  end
+  local min_pan = math.min(0, viewport_width - x)
+  pan = math.max(min_pan, math.min(0, pan))
+  if not target_start or min_pan == 0 then return pan end
+  if target_end - target_start > viewport_width then
+    -- A component larger than the viewport is aligned at its left edge.
+    pan = -target_start
+  elseif target_start + pan < 0 then
+    pan = -target_start
+  elseif target_end + pan > viewport_width then
+    pan = viewport_width - target_end
+  end
+  return math.max(min_pan, math.min(0, pan))
+end
+
 return Layout

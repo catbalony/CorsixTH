@@ -266,11 +266,24 @@ local function ClearSelection()
   MarkDirty()
 end
 
+local function RevealFocusedStrip()
+  if view_mode ~= "assembly" or assembly_mode ~= "strip" or #selected == 0 then return end
+  local sw, sh = GetViewerSize(TheApp.video)
+  local _, _, max_x, max_y = Layout.assembly_bounds(selected, "strip",
+    function(id) return sprite_table:size(id) end)
+  local placement = Layout.assembly_placement(sw, sh, header_height,
+    scale, 0, 0, max_x, max_y, "strip", assembly_pan_x)
+  assembly_pan_x = Layout.reveal_strip(selected,
+    function(id) return sprite_table:size(id) end,
+    focus_id, sw, placement.scale, assembly_pan_x)
+end
+
 local function FocusSelected(direction)
   if #selected == 0 then return end
   local index = (IndexOf(focus_id) or 1)
   index = (index - 1 + direction + #selected) % #selected + 1
   focus_id = selected[index].id
+  RevealFocusedStrip()
   MarkDirty()
 end
 
@@ -544,6 +557,7 @@ local function OpenView(mode)
     if mode == "assembly" and #selected > 0 and not IndexOf(focus_id) then
       focus_id = selected[1].id
     end
+    if mode == "assembly" then RevealFocusedStrip() end
   end
   MarkDirty()
 end
@@ -740,6 +754,7 @@ local function DoKey(_, rawchar, modifiers)
           not IndexOf(focus_id) then
         focus_id = selected[1].id
       end
+      if view_mode == "assembly" then RevealFocusedStrip() end
     end
     MarkDirty()
   elseif key == "t" then
@@ -870,6 +885,7 @@ local function DoMouseDown(_, button, x, y)
     for _, c in ipairs(assembly_hit_boxes) do
       if x >= c.x and x < c.x + c.w and y >= c.y and y < c.y + c.h then
         focus_id = c.id
+        RevealFocusedStrip()
         MarkDirty()
         return true
       end
@@ -963,27 +979,44 @@ local function RenderHeader(canvas, width)
   -- Intentionally plain; the sprites are the content, not the UI chrome.
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, width, header_height)
   local path = sprite_table_paths[sprite_table_index]
+  local sprite_w, sprite_h = sprite_table:size(focus_id)
   if width < 520 then
     DrawFittedText(canvas, "Sprite viewer  " .. path[2], 2, 1, width - 4)
-    DrawFittedText(canvas, "A/D tables  / find  G jump  F1 help", 2, 29, width - 4)
-    DrawFittedText(canvas, "W/S scroll  P palette  Q exit  checked " .. #selected, 2, 42, width - 4)
+    DrawFittedText(canvas, "Focus #" .. focus_id .. " " .. sprite_w .. "x" .. sprite_h ..
+      "   checked " .. #selected, 2, 29, width - 4)
+    DrawFittedText(canvas, "Click focus  box check  Shift-range  F1 help", 2, 42, width - 4)
   elseif width < 600 then
     font:draw(canvas, "Sprite viewer", 2, 1)
-    DrawFittedText(canvas, "A/D table W/S scroll V assembly T frames", 2, 15, width - 4)
-    DrawFittedText(canvas, "-/= zoom P palette G jump Q exit", 2, 28, width - 4)
-    DrawFittedText(canvas, path[2] .. "  checked: " .. #selected, 2, 41, width - 4)
+    DrawFittedText(canvas, "Click focus  box check  Shift-click range  F1 help", 2, 15, width - 4)
+    DrawFittedText(canvas, path[2] .. "  " .. palette_name, 2, 28, width - 4)
+    DrawFittedText(canvas, "Focus #" .. focus_id .. " " .. sprite_w .. "x" .. sprite_h ..
+      "   zoom " .. scale .. "x  checked: " .. #selected, 2, 41, width - 4)
   else
     font:draw(canvas, "Sprite viewer", 2, 1)
-    font:draw(canvas, "A/D tables  / find  W/S scroll  Shift-click range  I detail  V assemble  T frames", 2, 15)
-    font:draw(canvas, "-/= zoom  C format  P palette  Shift+P find palette  G jump  F1 help  Q exit", 2, 28)
-    DrawFittedText(canvas, table.concat(path, "/") .. "  " .. (is_complex and "complex" or "simple") ..
-      "  " .. palette_name .. "  zoom " .. scale .. "x  checked: " .. #selected, 2, 41, width - 4)
+    DrawFittedText(canvas,
+      "Click focus   box check   Shift-click range   / find   T frames   F1 help", 2, 15, width - 4)
+    DrawFittedText(canvas, table.concat(path, "/") .. "  " ..
+      (is_complex and "complex" or "simple") .. "  " .. palette_name, 2, 28, width - 4)
+    DrawFittedText(canvas, "Focus #" .. focus_id .. " " .. sprite_w .. "x" .. sprite_h ..
+      "  zoom " .. scale .. "x   checked: " .. #selected ..
+      "   P palette  Q close", 2, 41, width - 4)
   end
   if jump_mode then
     local prompt = (jump_mode == "sprite" and "Go #" or "Copies ") .. jump_text .. "_ Enter/Esc"
     canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, header_height - 16, width, 16)
     DrawFittedText(canvas, prompt, 3, header_height - 14, width - 6)
   end
+end
+
+-- Thin rectangles keep highlight edges crisp at native pixel size. The focus
+-- cue is a frame, never a tint over source sprite pixels. Checked state is a
+-- separate checkbox; the two states must remain legible independently.
+local function DrawOutline(canvas, colour, x, y, width, height)
+  if width <= 1 or height <= 1 then return end
+  canvas:drawRect(colour, x, y, width, 1)
+  canvas:drawRect(colour, x, y + height - 1, width, 1)
+  canvas:drawRect(colour, x, y, 1, height)
+  canvas:drawRect(colour, x + width - 1, y, 1, height)
 end
 
 local function RenderSheet(canvas, sw, sh)
@@ -995,16 +1028,23 @@ local function RenderSheet(canvas, sw, sh)
     local y = c.y + y_off
     if y >= header_height and y < sh and y + c.h > header_height then
       local checked = selected_lookup[c.id] == true
-      -- Checkbox at left of each label, separate from sprite focus.
-      local fg = canvas:mapRGB(160, 160, 160)
-      local accent = canvas:mapRGB(220, 220, 220)
-      canvas:drawRect(fg, c.x + 1, y + 1, 10, 10)
-      canvas:drawRect(canvas:mapRGB(24, 24, 24), c.x + 2, y + 2, 8, 8)
+      local focused = c.id == focus_id
+      -- Focus is a full label-row cue; checked is a distinct marked box.
+      -- Never shade the actual source sprite image beneath the row.
+      if focused then
+        canvas:drawRect(canvas:mapRGB(43, 66, 76), c.x, y,
+          math.max(1, c.w - 2), c.label_h + 3)
+        canvas:drawRect(canvas:mapRGB(119, 185, 193), c.x, y, 2, c.label_h + 3)
+      end
+      local border = checked and canvas:mapRGB(124, 207, 180) or
+        canvas:mapRGB(125, 125, 125)
+      canvas:drawRect(border, c.x + 2, y + 2, 9, 9)
+      canvas:drawRect(canvas:mapRGB(18, 18, 18), c.x + 3, y + 3, 7, 7)
       if checked then
-        canvas:drawRect(accent, c.x + 4, y + 4, 4, 4)
+        canvas:drawRect(border, c.x + 4, y + 4, 5, 5)
       end
       local w, h = sprite_table:size(c.id)
-      local marker = c.id == focus_id and ">" or " "
+      local marker = focused and ">" or " "
       font:draw(canvas, marker .. "#" .. c.id .. " " .. w .. "x" .. h, c.x + 12, y)
       sprite_table:draw(canvas, c.id, c.x, y + c.label_h + 4, {scaleFactor = scale})
       hit_boxes[#hit_boxes + 1] = {id = c.id, x = c.x, y = y, w = c.w, h = c.h}
@@ -1023,16 +1063,17 @@ local function RenderAssembly(canvas, sw, sh)
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
   if sw < 520 then
     font:draw(canvas, "Sprite assembly", 2, 2)
-    DrawFittedText(canvas, "V gallery  M strip/layers  J/K item", 2, 29, sw - 4)
-    DrawFittedText(canvas, "Arrows pan/nudge  N copies  F1 help", 2, 42, sw - 4)
+    DrawFittedText(canvas, assembly_mode .. "  " .. #selected ..
+      " parts   focus #" .. focus_id, 2, 29, sw - 4)
+    DrawFittedText(canvas, "J/K item  M mode  arrows pan  F1 help", 2, 42, sw - 4)
   elseif sw < 600 then
-    font:draw(canvas, "Assembly V: gallery M: strip/layers", 2, 2)
-    font:draw(canvas, "Click component / J,K focus  ,/. reorder", 2, 16)
-    font:draw(canvas, "N: repeat  arrows: pan / nudge  R: reset", 2, 30)
+    font:draw(canvas, "Sprite assembly", 2, 2)
+    DrawFittedText(canvas, "Click item  J/K focus  M mode  F1 help", 2, 16, sw - 4)
+    DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery", 2, 30, sw - 4)
   else
     font:draw(canvas, "Sprite assembly", 2, 2)
-    font:draw(canvas, "Click component or J/K: focus    ,/.: reorder    N: repeat count", 2, 16)
-    font:draw(canvas, "Arrows pan/nudge   Ctrl+S save   Ctrl+O load   X screenshot   F1 help", 2, 30)
+    DrawFittedText(canvas, "Click item  J/K focus  M strip/layers  Arrows pan/nudge  F1 help", 2, 16, sw - 4)
+    DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery  X capture", 2, 30, sw - 4)
   end
   if #selected == 0 then
     font:draw(canvas, "No sprites checked. Press V, tick some sprites, then return.", 8, 78)
@@ -1045,19 +1086,35 @@ local function RenderAssembly(canvas, sw, sh)
   local fit = placement.scale
   assembly_min_pan_x, assembly_pan_x = placement.pan_min, placement.pan_x
   local start_x, start_y = placement.x, placement.y
+  local active_idx = IndexOf(focus_id) or 1
+  local active_rect
   local cursor = 0
-  for _, item in ipairs(selected) do
+  for i, item in ipairs(selected) do
     local w, h = sprite_table:size(item.id)
     if assembly_mode == "strip" then
+      local left = start_x + cursor * fit
       for _ = 1, item.repeat_count do
         sprite_table:draw(canvas, item.id, start_x + cursor * fit,
           start_y + (composite_h - h) * fit, {scaleFactor = fit})
         cursor = cursor + w
       end
+      if i == active_idx then
+        active_rect = {left, start_y + (composite_h - h) * fit,
+          w * item.repeat_count * fit, h * fit}
+      end
     else
-      sprite_table:draw(canvas, item.id, start_x + (item.dx - min_x) * fit,
-        start_y + (item.dy - min_y) * fit, {scaleFactor = fit})
+      local x, y = start_x + (item.dx - min_x) * fit,
+        start_y + (item.dy - min_y) * fit
+      sprite_table:draw(canvas, item.id, x, y, {scaleFactor = fit})
+      if i == active_idx then active_rect = {x, y, w * fit, h * fit} end
     end
+  end
+  -- Emphasise the component being edited, including all repeated strip copies.
+  -- This overlay belongs solely to the inspector: no original pixels change.
+  if active_rect then
+    DrawOutline(canvas, canvas:mapRGB(132, 199, 206),
+      active_rect[1] - 1, active_rect[2] - 1,
+      active_rect[3] + 2, active_rect[4] + 2)
   end
   -- A long checked set must never become a clipped single line. Keep a
   -- short, clickable window of component IDs near the focused component.
@@ -1067,7 +1124,6 @@ local function RenderAssembly(canvas, sw, sh)
     desc = desc .. "  pan " .. -assembly_pan_x .. "/" .. -assembly_min_pan_x
   end
   DrawFittedText(canvas, desc, 8, sh - 75, sw - 16)
-  local active_idx = IndexOf(focus_id) or 1
   local active = selected[active_idx]
   local details = "Focus #" .. active.id .. "  item " .. active_idx .. "/" .. #selected
   if assembly_mode == "strip" then
@@ -1083,7 +1139,7 @@ local function RenderAssembly(canvas, sw, sh)
                                     #selected - visible + 1))
   local last = math.min(#selected, first + visible - 1)
   local grey = canvas:mapRGB(115, 115, 115)
-  local ink = canvas:mapRGB(220, 220, 220)
+  local ink = canvas:mapRGB(132, 199, 206)
   local dark = canvas:mapRGB(18, 18, 18)
   local row_y = sh - 34
   for i = first, last do
