@@ -34,6 +34,7 @@ local Browser = require("sprite_viewer_browser")
 local Selection = require("sprite_viewer_selection")
 local Layout = require("sprite_viewer_layout")
 local Assembly = require("sprite_viewer_assembly")
+local History = require("sprite_viewer_history")
 local font -- Set on open
 local need_draw = true
 local sprite_table_paths = {}
@@ -69,6 +70,7 @@ local assembly_min_pan_x = 0
 local focus_id = 0
 local selected = {}  -- list of {id, dx, dy, repeat_count} in selection order
 local selected_lookup = {} -- constant-time checkbox rendering, even for large tables
+local assembly_history = History.new(32) -- bounded; no disk writes
 local selection_anchor = nil -- first click/jump of a Shift-click range
 local hit_boxes = {}
 local assembly_hit_boxes = {}
@@ -227,6 +229,7 @@ end
 
 local function ToggleSelection(id)
   selected, selected_lookup = Selection.toggle(selected, selected_lookup, id)
+  History.clear(assembly_history)
   focus_id, selection_anchor = id, id
   animation_index = math.min(animation_index, math.max(1, #selected))
   MarkDirty()
@@ -242,6 +245,7 @@ local function SelectRange(anchor, target)
     return
   end
   selected, selected_lookup = next_items, next_lookup
+  History.clear(assembly_history)
   focus_id, selection_anchor = target, anchor
   MarkDirty()
 end
@@ -253,6 +257,7 @@ local function BulkSelect(invert)
     notice = err
   else
     selected, selected_lookup = next_items, next_lookup
+    History.clear(assembly_history)
     animation_index = 1
     notice = string.format("%d sprites checked", #selected)
   end
@@ -260,6 +265,7 @@ local function BulkSelect(invert)
 end
 
 local function ClearSelection()
+  History.clear(assembly_history)
   selected, selected_lookup = {}, {}
   selection_anchor = nil
   animation_index = 1
@@ -298,7 +304,27 @@ end
 -- independently mutate dx/dy, repeat counts or the checked-list order.
 local function EditAssembly(action, step)
   if view_mode ~= "assembly" then return false end
-  if not Assembly.apply(selected, focus_id, action, step) then return false end
+  if not History.perform(assembly_history, selected, focus_id, action,
+      function() return Assembly.apply(selected, focus_id, action, step) end) then
+    return false
+  end
+  RevealFocusedStrip()
+  MarkDirty()
+  return true
+end
+
+local function UndoRedoAssembly(redo)
+  if view_mode ~= "assembly" then return false end
+  local items, focus, action
+  if redo then
+    items, focus, action = History.redo(assembly_history, selected, focus_id)
+  else
+    items, focus, action = History.undo(assembly_history, selected, focus_id)
+  end
+  if not items then return false end
+  selected, selected_lookup = items, History.lookup(items)
+  focus_id = focus
+  notice = (redo and "Redid: " or "Undid: ") .. action
   RevealFocusedStrip()
   MarkDirty()
   return true
@@ -389,6 +415,7 @@ local function LoadTable(n, complex, detect_palette)
   focus_id = 0
   selected = {}
   selected_lookup = {}
+  History.clear(assembly_history)
   selection_anchor = nil
   assembly_pan_x = 0
   assembly_min_pan_x = 0
@@ -429,6 +456,7 @@ local function ReLoadSameTable()
   -- A decoding-mode switch may change how many entries exist.
   local available = #sprite_table
   selected, selected_lookup = Selection.prune(selected, available)
+  History.clear(assembly_history)
   focus_id = math.max(0, math.min(focus_id, available - 1))
   if selection_anchor and selection_anchor >= available then
     selection_anchor = nil
@@ -558,6 +586,7 @@ local function LoadRecipe()
   local parsed, why = Recipe.load(path, source[1], source[2], is_complex, #sprite_table)
   if not parsed then notice = why; MarkDirty(); return end
   selected, selected_lookup = parsed.items, parsed.lookup
+  History.clear(assembly_history)
   assembly_mode = parsed.mode
   animation_index = 1
   assembly_pan_x = 0
@@ -611,6 +640,10 @@ local function DoKey(_, rawchar, modifiers)
     MarkDirty()
     return true
   end
+  if modifiers.ctrl and (key == "z" or key == "y") then
+    UndoRedoAssembly(key == "y" or modifiers.shift)
+    return true
+  end
   if modifiers.ctrl and key == "s" then
     SaveRecipe()
     return true
@@ -635,8 +668,11 @@ local function DoKey(_, rawchar, modifiers)
           view_mode = "sheet"
           ShowSprite(math.floor(value))
         else
-          if Assembly.set_copies(selected, focus_id,
-              math.max(1, math.min(99, math.floor(value)))) then
+          if view_mode == "assembly" and History.perform(assembly_history,
+              selected, focus_id, "set copies", function()
+                return Assembly.set_copies(selected, focus_id,
+                  math.max(1, math.min(99, math.floor(value))))
+              end) then
             RevealFocusedStrip()
           end
         end
@@ -838,7 +874,9 @@ local function DoKey(_, rawchar, modifiers)
     jump_mode, jump_text = "sprite", ""
     MarkDirty()
   elseif key == "n" then
-    if #selected > 0 then jump_mode, jump_text = "copies", ""; MarkDirty() end
+    if view_mode == "assembly" and #selected > 0 then
+      jump_mode, jump_text = "copies", ""; MarkDirty()
+    end
   elseif key == "comma" or key == "," then
     EditAssembly("move-left")
   elseif key == "period" or key == "." then
@@ -910,8 +948,12 @@ local function DoMouseDown(_, button, x, y)
     for _, c in ipairs(assembly_hit_boxes) do
       if x >= c.x and x < c.x + c.w and y >= c.y and y < c.y + c.h then
         if c.kind == "action" then
-          local mods = (SDL.getKeyModifiers and SDL.getKeyModifiers()) or {}
-          EditAssembly(c.action, mods.shift and 8 or 1)
+          if c.action == "undo" or c.action == "redo" then
+            UndoRedoAssembly(c.action == "redo")
+          else
+            local mods = (SDL.getKeyModifiers and SDL.getKeyModifiers()) or {}
+            EditAssembly(c.action, mods.shift and 8 or 1)
+          end
         elseif c.kind == "overview" then
           local size_of = function(id) return sprite_table:size(id) end
           local index = Layout.strip_pick(selected, size_of, x, c.x, c.w)
@@ -1168,7 +1210,10 @@ local function RenderAssembly(canvas, sw, sh)
   -- The toolbar overlays only the reserved inspector footer, not game pixels.
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, sh - 108, sw, 29)
   for _, action in ipairs(Layout.assembly_controls(sw, sh, assembly_mode)) do
-    local enabled = Assembly.can(selected, focus_id, action.action)
+    local enabled = action.action == "undo" and History.can_undo(assembly_history)
+      or action.action == "redo" and History.can_redo(assembly_history)
+      or (action.action ~= "undo" and action.action ~= "redo" and
+          Assembly.can(selected, focus_id, action.action))
     canvas:drawRect(canvas:mapRGB(enabled and 91 or 56,
       enabled and 128 or 60, enabled and 139 or 64),
       action.x, action.y, action.w, action.h)
@@ -1199,7 +1244,8 @@ local function RenderAssembly(canvas, sw, sh)
   end
   local _, _, page_number, page_count = Layout.assembly_page(
     active_idx, #selected, AssemblyPageCapacity())
-  details = details .. "  page " .. page_number .. "/" .. page_count
+  details = details .. "  page " .. page_number .. "/" .. page_count ..
+    "  history " .. #assembly_history.past .. "/" .. #assembly_history.future
   DrawFittedText(canvas, details, 8, sh - 59, sw - 16)
   local cell_w = sw < 520 and 56 or 70
   local visible = AssemblyPageCapacity()
@@ -1453,6 +1499,7 @@ local function RenderHelp(canvas, sw, sh)
     "          J/K focus  PgUp/Dn pages  Home/End ends",
     "          Click overview track to seek wide strips",
     "          Edit buttons: order, copies, XY offsets, reset",
+    "          Undo Ctrl+Z   Redo Ctrl+Y / Ctrl+Shift+Z",
     "          arrows pan/nudge   Shift+arrows x8   N copies",
     "Frames:   T toggle   Space play   Left/Right step",
     "          [/]: FPS   L loop/once/pingpong   H align",

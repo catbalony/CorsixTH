@@ -110,12 +110,12 @@ function Layout.assembly_controls(screen_width, screen_height, mode)
   local entries = mode == "strip" and {
     {"move-left", "Order <"}, {"move-right", "Order >"},
     {"copy-minus", "Copies -"}, {"copy-plus", "Copies +"},
-    {"reset", "Reset"},
+    {"reset", "Reset"}, {"undo", "Undo"}, {"redo", "Redo"},
   } or {
     {"move-left", "Order <"}, {"move-right", "Order >"},
     {"dx-minus", "X -"}, {"dx-plus", "X +"},
     {"dy-minus", "Y -"}, {"dy-plus", "Y +"},
-    {"reset", "Reset"},
+    {"reset", "Reset"}, {"undo", "Undo"}, {"redo", "Redo"},
   }
   local gap = 5
   local available = math.max(1, screen_width - 16)
