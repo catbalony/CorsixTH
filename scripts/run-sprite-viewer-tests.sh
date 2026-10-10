@@ -12,3 +12,5 @@ else
 fi
 "${runner[@]}" tests/sprite_viewer/test_browser.lua
 "${runner[@]}" tests/sprite_viewer/test_recipe.lua
+"${runner[@]}" tests/sprite_viewer/test_selection.lua
+"${runner[@]}" tests/sprite_viewer/test_layout.lua
