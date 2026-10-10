@@ -38,3 +38,14 @@ Do not add automatic push, pull request, schedule or polling triggers without
 explicit approval from the repository owner; their Actions usage is limited.
 Prefer local Lua tests and native Xvfb/AppImage smoke runs. See
 `docs/COMPACT_UI_AND_RECOVERY.md` for current test instructions and evidence.
+
+## v12 — long assembly navigation
+
+See `docs/ASSEMBLY_NAVIGATION.md`. The overview is derived from source pixel
+**width** and repetitions. Beware Lua's expansion of a two-value
+`size_of(id)` when used as a final function argument; never use height
+for horizontal hit positions. The real SDL smoke test verifies paging and
+overview clicks at 640x480. Forced X11 resize screenshots at 320x200 do not
+establish compact native mouse correctness. Run locally with
+`--assembly-navigation-check --resize-check`; do not enable automatic
+GitHub Actions for this branch.
