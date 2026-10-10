@@ -92,5 +92,20 @@ assert(not h.motion(nil,20,223,10,7))
 assert(h.buttondown(nil,1,330,225));h.motion(nil,338,232,8,7)
 h.window_resized();render()
 assert(says('offset (30,10)') and says('history 1/1'))
+-- Activation/focus changes can swallow the matching mouse-up; cancel safely.
+assert(h.buttondown(nil,1,330,225))
+assert(h.motion(nil,339,234,9,9))
+h.active();render()
+assert(says('offset (30,10)') and says('history 1/1'))
+assert(not h.buttonup(nil,1,339,234),'lost mouse-up must not commit a drag')
+-- Q must be a usable search character, not an exit when its key is released.
+key('/');key('q');h.keyup(nil,'q')
+assert(TheApp.eventHandlers==h,'typing q in the table browser must not exit')
+key('escape')
+-- The same rule applies while help is open.
+key('f1');h.keyup(nil,'q')
+assert(TheApp.eventHandlers==h,'q release with help open must not exit')
+key('escape')
+-- Outside overlays, the original Q-to-exit shortcut remains intact.
 h.keyup(nil,'q');assert(TheApp.eventHandlers==old)
-print('PASS: drag threshold, zoom/grid snapping, live preview, single undo, cancellation, resize and redo integrity')
+print('PASS: drag threshold, zoom/grid snapping, single undo, cancel on resize/focus, Q modal safety and redo integrity')
