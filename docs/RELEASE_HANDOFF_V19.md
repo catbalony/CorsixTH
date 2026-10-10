@@ -48,8 +48,11 @@ report into a private temporary directory. It never dispatches Actions.
 Complete the report's *manual* checks: search/help Q, focus-loss and
 wheel-interrupted drags, and 640x480 / 800x600 visual inspection.
 The manual cases remain open even if every automated check says PASS.
-The shell script was syntax-checked locally, but an actual run of the script
-against the complete updated checkout is still required.
+The acceptance shell script was syntax-checked locally, but an actual run
+against the complete updated checkout is still required. The source-only
+packaging script also passed a synthetic-checkout smoke test for ZIP integrity,
+private-file exclusion and wrong-branch refusal; this is **not** an acceptance
+test of the Sprite Viewer itself.
 
 ## Native setup evidence from this checkpoint
 
@@ -72,9 +75,14 @@ successful acceptance from committed tests.
 1. Capture the tested commit SHA, full command lines and each separate
    Lua/native result. Attach the private acceptance report, redacting private
    asset locations when needed.
-2. Produce a source-only archive of viewer modules, tests, docs, runner and
-   applicable license, and optionally a Git bundle for maintainers. Verify
-   the archive against its clean checkout.
+2. Produce the source-only archive from the clean engineering branch
+   with `bash scripts/package-sprite-viewer.sh /private/review-package`.
+   The script pins the checked-out commit, archives an explicit source
+   whitelist (viewer modules, tests, docs, runner, MIT license), verifies
+   the ZIP and excludes proprietary files and native PNGs, then emits a
+   SHA-256 and `REVIEW_STATUS.txt`. It refuses other branches or tracked
+   working-tree edits. This is a **review-only package**, not proof of QA.
+   Optionally create a Git bundle separately for maintainers.
 3. Include an indexed diff, review notes and reproducible test instructions.
    Record any unresolved defect with severity and a deliberate accept/defer
    decision. Critical/major regressions prevent signoff.
