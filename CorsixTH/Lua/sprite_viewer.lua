@@ -33,6 +33,7 @@ local Recipe = require("sprite_viewer_recipe")
 local Browser = require("sprite_viewer_browser")
 local Selection = require("sprite_viewer_selection")
 local Layout = require("sprite_viewer_layout")
+local Assembly = require("sprite_viewer_assembly")
 local font -- Set on open
 local need_draw = true
 local sprite_table_paths = {}
@@ -291,6 +292,16 @@ local function FocusSelected(direction)
   local index = IndexOf(focus_id) or 1
   index = (index - 1 + direction + #selected) % #selected + 1
   FocusAssemblyIndex(index)
+end
+
+-- A single edit path for all assembly controls; input handlers must not
+-- independently mutate dx/dy, repeat counts or the checked-list order.
+local function EditAssembly(action, step)
+  if view_mode ~= "assembly" then return false end
+  if not Assembly.apply(selected, focus_id, action, step) then return false end
+  RevealFocusedStrip()
+  MarkDirty()
+  return true
 end
 
 local function AssemblyPageCapacity()
@@ -624,8 +635,10 @@ local function DoKey(_, rawchar, modifiers)
           view_mode = "sheet"
           ShowSprite(math.floor(value))
         else
-          local item = selected[IndexOf(focus_id)]
-          if item then item.repeat_count = math.max(1, math.min(99, math.floor(value))) end
+          if Assembly.set_copies(selected, focus_id,
+              math.max(1, math.min(99, math.floor(value)))) then
+            RevealFocusedStrip()
+          end
         end
       end
       jump_mode, jump_text = nil, ""
@@ -826,40 +839,26 @@ local function DoKey(_, rawchar, modifiers)
     MarkDirty()
   elseif key == "n" then
     if #selected > 0 then jump_mode, jump_text = "copies", ""; MarkDirty() end
-  elseif key == "comma" or key == "," or key == "period" or key == "." then
-    local from = IndexOf(focus_id)
-    if from then
-      local to = from + ((key == "comma" or key == ",") and -1 or 1)
-      if selected[to] then
-        selected[from], selected[to] = selected[to], selected[from]
-        RevealFocusedStrip()
-        MarkDirty()
-      end
-    end
+  elseif key == "comma" or key == "," then
+    EditAssembly("move-left")
+  elseif key == "period" or key == "." then
+    EditAssembly("move-right")
   elseif key == "left" or key == "right" or key == "up" or key == "down" then
     if view_mode == "assembly" and assembly_mode == "strip" then
-      -- Native-size composites can exceed the window. Pan the viewport,
-      -- never the source offsets, rather than hiding inaccessible components.
+      -- Pan the viewport only, leaving actual sprite positions unchanged.
       if key == "left" then
         assembly_pan_x = math.min(0, assembly_pan_x + 32)
       elseif key == "right" then
         assembly_pan_x = math.max(assembly_min_pan_x, assembly_pan_x - 32)
       end
       MarkDirty()
-    else
-      local item = selected[IndexOf(focus_id)]
-      if item and view_mode == "assembly" and assembly_mode == "layers" then
-        if key == "left" then item.dx = item.dx - 1 end
-        if key == "right" then item.dx = item.dx + 1 end
-        if key == "up" then item.dy = item.dy - 1 end
-        if key == "down" then item.dy = item.dy + 1 end
-        MarkDirty()
-      end
+    elseif view_mode == "assembly" and assembly_mode == "layers" then
+      local action = ({left = "dx-minus", right = "dx-plus",
+        up = "dy-minus", down = "dy-plus"})[key]
+      EditAssembly(action, modifiers.shift and 8 or 1)
     end
   elseif key == "r" then
-    local item = selected[IndexOf(focus_id)]
-    if item then item.dx, item.dy, item.repeat_count = 0, 0, 1 end
-    MarkDirty()
+    EditAssembly("reset")
   end
   return need_draw
 end
@@ -910,7 +909,10 @@ local function DoMouseDown(_, button, x, y)
     if button ~= 1 then return false end
     for _, c in ipairs(assembly_hit_boxes) do
       if x >= c.x and x < c.x + c.w and y >= c.y and y < c.y + c.h then
-        if c.kind == "overview" then
+        if c.kind == "action" then
+          local mods = (SDL.getKeyModifiers and SDL.getKeyModifiers()) or {}
+          EditAssembly(c.action, mods.shift and 8 or 1)
+        elseif c.kind == "overview" then
           local size_of = function(id) return sprite_table:size(id) end
           local index = Layout.strip_pick(selected, size_of, x, c.x, c.w)
           if index then
