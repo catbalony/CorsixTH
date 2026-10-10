@@ -313,17 +313,42 @@ local function DefaultComplex(path)
   return complex_panel_tables[path[2]:upper()] or false
 end
 
+-- Resource selection is a transaction: never discard the current sheet, its
+-- checked sprites or scroll position until the replacement has loaded. A bad
+-- DAT/TAB, decoder choice or palette must be visible as a notice, not a crash.
+local last_loaded_complex, last_loaded_palette_index
+local function TryLoadSheet(path, complex, palette_choice)
+  local ok, result = pcall(function()
+    local name = assert(palettes[palette_choice], "No palette available")
+    local palette = gfx:getPalette(name)
+    local sheet = gfx:loadSpriteTable(path[1], path[2], complex, palette)
+    assert(sheet, "Sprite loader returned no table")
+    local _ = #sheet -- Trigger malformed sprite-table metadata errors here.
+    return sheet
+  end)
+  if not ok then return nil, tostring(result) end
+  return result
+end
+
+local function ReportLoadFailure(err)
+  local explanation = tostring(err):match("[^\r\n]+") or "Unknown loader error"
+  notice = "Sprite load failed: " .. explanation
+  MarkDirty()
+  return false
+end
+
 local function LoadTable(n, complex, detect_palette)
-  if not sprite_table_paths[n] then return end
-  sprite_table_index = n
   local path = sprite_table_paths[n]
+  if not path then return false end
   if complex == nil then complex = DefaultComplex(path) end
-  is_complex = complex
-  if detect_palette then
-    palette_index = Browser.closest_palette(path[2], palettes) or mpalette_index or 1
-  end
-  palette_name = palettes[palette_index]
-  sprite_table = gfx:loadSpriteTable(path[1], path[2], complex, gfx:getPalette(palette_name))
+  local choice = detect_palette and
+    (Browser.closest_palette(path[2], palettes) or mpalette_index or 1) or palette_index
+  local loaded, err = TryLoadSheet(path, complex, choice)
+  if not loaded then return ReportLoadFailure(err) end
+  sprite_table, sprite_table_index = loaded, n
+  palette_index, palette_name = choice, palettes[choice]
+  is_complex, last_loaded_complex = complex, complex
+  last_loaded_palette_index = choice
   sheet_layout_cache = nil
   y_off = 0
   focus_id = 0
@@ -338,14 +363,33 @@ local function LoadTable(n, complex, detect_palette)
   view_mode = "sheet"
   ResetAnimation()
   MarkDirty()
+  return true
 end
-LoadTable(1, nil, true)
+
+-- On unusual installations an isolated table can be damaged. Start with the
+-- first readable one rather than leaving the debug viewer uninitialised.
+if not LoadTable(1, nil, true) then
+  for i = 2, #sprite_table_paths do
+    if LoadTable(i, nil, true) then break end
+  end
+end
+if not sprite_table then
+  error("Sprite viewer: no readable DAT/TAB sprite table could be loaded")
+end
 
 local function ReLoadSameTable()
   -- Keep selections and scroll when simply changing the palette or decoding.
   local path = sprite_table_paths[sprite_table_index]
+  local loaded, err = TryLoadSheet(path, is_complex, palette_index)
+  if not loaded then
+    -- Callers may already have changed the requested format or palette.
+    is_complex = last_loaded_complex
+    palette_index = last_loaded_palette_index
+    return ReportLoadFailure(err)
+  end
+  sprite_table = loaded
   palette_name = palettes[palette_index]
-  sprite_table = gfx:loadSpriteTable(path[1], path[2], is_complex, gfx:getPalette(palette_name))
+  last_loaded_complex, last_loaded_palette_index = is_complex, palette_index
   sheet_layout_cache = nil
   -- A decoding-mode switch may change how many entries exist.
   local available = #sprite_table
@@ -355,7 +399,9 @@ local function ReLoadSameTable()
     selection_anchor = nil
   end
   if animation_index > #selected then animation_index = math.max(1, #selected) end
+  notice = nil
   MarkDirty()
+  return true
 end
 
 local function LayoutSheet(screen_width)
