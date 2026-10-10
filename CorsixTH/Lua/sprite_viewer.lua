@@ -35,6 +35,7 @@ local Selection = require("sprite_viewer_selection")
 local Layout = require("sprite_viewer_layout")
 local Assembly = require("sprite_viewer_assembly")
 local History = require("sprite_viewer_history")
+local Drag = require("sprite_viewer_drag")
 local font -- Set on open
 local need_draw = true
 local sprite_table_paths = {}
@@ -75,6 +76,7 @@ local selection_anchor = nil -- first click/jump of a Shift-click range
 local hit_boxes = {}
 local assembly_hit_boxes = {}
 local assembly_preview_rects = {}
+local assembly_drag = nil -- pending layer drag; exactly one undo on mouse release
 local sheet_layout_cache = nil
 local header_height = 56
 local entry_height = 0
@@ -292,6 +294,35 @@ local function FocusAssemblyIndex(index)
   focus_id = item.id
   RevealFocusedStrip()
   MarkDirty()
+end
+
+-- A drag previews source-pixel offsets in memory. Only the completed motion
+-- is stored in history; Escape, reloading and view changes restore the start.
+local function CancelAssemblyDrag()
+  if not assembly_drag then return false end
+  local d = assembly_drag
+  assembly_drag = nil
+  Assembly.set_offset(selected, d.id, d.origin_x, d.origin_y)
+  MarkDirty()
+  return true
+end
+
+local function CommitAssemblyDrag()
+  if not assembly_drag then return false end
+  local d = assembly_drag
+  assembly_drag = nil
+  local item = selected[d.index]
+  if not item or item.id ~= d.id then return false end
+  local final_x, final_y = item.dx, item.dy
+  item.dx, item.dy = d.origin_x, d.origin_y
+  if final_x == d.origin_x and final_y == d.origin_y then
+    MarkDirty()
+    return false
+  end
+  local changed = History.perform(assembly_history, selected, d.id, "drag layer",
+    function() return Assembly.set_offset(selected, d.id, final_x, final_y) end)
+  MarkDirty()
+  return changed
 end
 
 local function FocusSelected(direction)
@@ -598,6 +629,7 @@ local function LoadRecipe()
 end
 
 local function OpenView(mode)
+  CancelAssemblyDrag()
   if mode == "animation" then
     if view_mode ~= "animation" then OpenAnimation() end
   elseif mode == "inspector" then
@@ -616,6 +648,15 @@ end
 
 local function DoKey(_, rawchar, modifiers)
   local key = rawchar:lower()
+  if assembly_drag then
+    -- Modifier events may arrive during a drag as the user toggles snapping.
+    if key == "left ctrl" or key == "right ctrl" or key == "left shift" or
+        key == "right shift" or key == "lctrl" or key == "rctrl" then
+      return false
+    end
+    CancelAssemblyDrag()
+    if key == "escape" then return true end
+  end
   modifiers = modifiers or {}
   if key == "f1" or key == "?" then
     help_open = not help_open
@@ -904,6 +945,7 @@ end
 
 local function DoKeyUp(_, rawchar)
   local key = rawchar:lower()
+  if key == "q" then CancelAssemblyDrag() end
   if key == "q" then
     TheApp.eventHandlers = old_event_handlers
     sprite_viewer_gfx_cache = gfx.cache.tabled
@@ -917,6 +959,7 @@ end
 local function DoTextInput() return false end
 
 local function DoMouseDown(_, button, x, y)
+  CancelAssemblyDrag()
   if help_open then
     if button == 1 then help_open = false; MarkDirty() end
     return true
@@ -978,6 +1021,22 @@ local function DoMouseDown(_, button, x, y)
       header_height, sh - 109)
     if index then
       FocusAssemblyIndex(index)
+      if assembly_mode == "layers" then
+        local item = selected[index]
+        local rect = assembly_preview_rects[index]
+        if rect then
+          -- Snapshot scale and down point; reflow during motion cannot create
+          -- feedback or move the pointer relative to the dragged sprite.
+          local sw, sh = GetViewerSize(TheApp.video)
+          local min_x, min_y, max_x, max_y = Layout.assembly_bounds(selected,
+            "layers", function(id) return sprite_table:size(id) end)
+          local placement = Layout.assembly_placement(sw, sh, header_height,
+            scale, min_x, min_y, max_x, max_y, "layers", assembly_pan_x)
+          assembly_drag = Drag.begin(item, index, x, y, placement.scale)
+          assembly_drag.placement = placement
+          assembly_drag.min_x, assembly_drag.min_y = min_x, min_y
+        end
+      end
       if assembly_mode == "layers" and overlap > 1 then
         notice = "Overlapping layers " .. overlap .. ": Shift+click cycles below"
       end
@@ -1017,6 +1076,24 @@ local function DoMouseDown(_, button, x, y)
     end
   end
   return false
+end
+
+local function DoMouseMove(_, x, y, dx, dy)
+  if not assembly_drag then return false end
+  local mods = (SDL.getKeyModifiers and SDL.getKeyModifiers()) or {}
+  local nx, ny = Drag.position(assembly_drag, x, y, mods.ctrl)
+  Assembly.set_offset(selected, assembly_drag.id, nx, ny)
+  MarkDirty()
+  return true
+end
+
+local function DoMouseUp(_, button, x, y)
+  if button ~= 1 or not assembly_drag then return false end
+  local mods = (SDL.getKeyModifiers and SDL.getKeyModifiers()) or {}
+  local nx, ny = Drag.position(assembly_drag, x, y, mods.ctrl)
+  Assembly.set_offset(selected, assembly_drag.id, nx, ny)
+  CommitAssemblyDrag()
+  return true
 end
 
 local function DoMouseWheel(_, x, y)
@@ -1169,15 +1246,15 @@ local function RenderAssembly(canvas, sw, sh)
     font:draw(canvas, "Sprite assembly", 2, 2)
     DrawFittedText(canvas, assembly_mode .. "  " .. #selected ..
       " parts   focus #" .. focus_id, 2, 29, sw - 4)
-    DrawFittedText(canvas, "Click art  J/K/wheel focus  F1", 2, 42, sw - 4)
+    DrawFittedText(canvas, "Click / drag layer  F1 help", 2, 42, sw - 4)
   elseif sw < 600 then
     font:draw(canvas, "Sprite assembly", 2, 2)
-    DrawFittedText(canvas, "Click item  J/K/wheel focus  M mode  F1", 2, 16, sw - 4)
+    DrawFittedText(canvas, "Click / drag layer  M mode  F1", 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery", 2, 30, sw - 4)
   else
     font:draw(canvas, "Sprite assembly", 2, 2)
     local hint = assembly_mode == "layers" and
-      "Click artwork to focus  Shift+click cycles overlaps  J/K focus  F1" or
+      "Drag layers  Ctrl snap 8px  Shift+click cycles  F1" or
       "Click artwork or overview  J/K/wheel focus  PgUp/Dn  F1"
     DrawFittedText(canvas, hint, 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery  X capture", 2, 30, sw - 4)
@@ -1187,8 +1264,16 @@ local function RenderAssembly(canvas, sw, sh)
     return
   end
   local min_x, min_y, max_x, max_y = AssemblyBounds()
-  local placement = Layout.assembly_placement(sw, sh, header_height,
-    scale, min_x, min_y, max_x, max_y, assembly_mode, assembly_pan_x)
+  local placement
+  if assembly_drag and assembly_mode == "layers" then
+    -- Freeze the visual origin during a drag. Otherwise changing the current
+    -- minimum offset would re-centre the whole composite under the pointer.
+    placement = assembly_drag.placement
+    min_x, min_y = assembly_drag.min_x, assembly_drag.min_y
+  else
+    placement = Layout.assembly_placement(sw, sh, header_height,
+      scale, min_x, min_y, max_x, max_y, assembly_mode, assembly_pan_x)
+  end
   local composite_w, composite_h = placement.width, placement.height
   local fit = placement.scale
   assembly_min_pan_x, assembly_pan_x = placement.pan_min, placement.pan_x
@@ -1253,7 +1338,8 @@ local function RenderAssembly(canvas, sw, sh)
     details = details .. "  copies " .. active.repeat_count
   else
     details = details .. "  offset (" .. active.dx .. "," .. active.dy .. ")" ..
-      "  layer " .. active_idx .. "/" .. #selected
+      "  layer " .. active_idx .. "/" .. #selected ..
+      (assembly_drag and "  DRAG (Esc cancel)" or "")
   end
   local _, _, page_number, page_count = Layout.assembly_page(
     active_idx, #selected, AssemblyPageCapacity())
@@ -1512,6 +1598,7 @@ local function RenderHelp(canvas, sw, sh)
     "          J/K focus  PgUp/Dn pages  Home/End ends",
     "          Click overview track to seek wide strips",
     "          Click artwork to focus  Shift+click cycles overlap",
+    "          Drag layer  Ctrl snap 8px  Esc cancels drag",
     "          Edit buttons: order, copies, XY offsets, reset",
     "          Undo Ctrl+Z   Redo Ctrl+Y / Ctrl+Shift+Z",
     "          arrows pan/nudge   Shift+arrows x8   N copies",
@@ -1632,6 +1719,7 @@ end
 -- owns the input handlers. Do not forward them to the game underneath.
 -- A resize invalidates the cached contact-sheet positions.
 local function DoWindowResize()
+  CancelAssemblyDrag()
   sheet_layout_cache = nil
   MarkDirty()
   return true
@@ -1662,8 +1750,8 @@ local function open()
     timer = DoTimer,
     textinput = DoTextInput,
     buttondown = DoMouseDown,
-    buttonup = IgnoreViewerEvent,
-    motion = IgnoreViewerEvent,
+    buttonup = DoMouseUp,
+    motion = DoMouseMove,
     active = DoActive,
     window_resize = DoWindowResize, -- legacy alias for older event dispatchers
     window_resized = DoWindowResize, -- CorsixTH SDL3 dispatcher
