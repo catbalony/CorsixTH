@@ -30,3 +30,11 @@ Private file checksums (SHA-256):
 Keep changes small and independently reviewable (`docs`, `refactor`, `test`, `fix`, `feat`). Preserve upstream licence. Never infer animation metadata from the DAT/TAB files; use user-selected frame ranges and explicit offsets. Keep original game folders read-only; recipe IO writes only to Screenshots. Validate external files before mutating selection. Unit Lua mocks and **real native SDL smoke tests** are different levels of evidence. Do both.
 
 The local engineering work has extracted sidecar recipe/persistence and resource-search helpers, with regression coverage, and added an automated Xvfb/AppImage native smoke runner. Transfer the local Git bundle before claiming these code changes are available in this remote branch.
+
+## GitHub Actions cost policy (v10)
+
+The dedicated sprite-viewer workflow is **manual-only** (`workflow_dispatch`).
+Do not add automatic push, pull request, schedule or polling triggers without
+explicit approval from the repository owner; their Actions usage is limited.
+Prefer local Lua tests and native Xvfb/AppImage smoke runs. See
+`docs/COMPACT_UI_AND_RECOVERY.md` for current test instructions and evidence.
