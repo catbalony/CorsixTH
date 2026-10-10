@@ -32,6 +32,7 @@ local SDL = rawget(_G, "SDL") or require("sdl")
 local Recipe = require("sprite_viewer_recipe")
 local Browser = require("sprite_viewer_browser")
 local Selection = require("sprite_viewer_selection")
+local Layout = require("sprite_viewer_layout")
 local font -- Set on open
 local need_draw = true
 local sprite_table_paths = {}
@@ -337,35 +338,18 @@ local function LayoutSheet(screen_width)
   if cache and cache.width == screen_width and cache.zoom == scale then
     return cache.cells, cache.total
   end
-  local x, y = 0, header_height
-  local tallest = 0
-  local cells = {}
-  for i = 0, #sprite_table - 1 do
-    local w, h = sprite_table:size(i)
-    local img_w, img_h = w * scale, h * scale
-    local label_w, label_h = font:sizeOf("#" .. i .. " " .. w .. "x" .. h)
-    local cell_w = math.max(img_w, label_w + 18, 28) + 6
-    local cell_h = img_h + label_h + 7
-    if x > 0 and x + cell_w > screen_width then
-      x, y = 0, y + tallest
-      tallest = 0 -- Fix original wrapping bug (tallest previously persisted)
-    end
-    cells[#cells + 1] = {id = i, x = x, y = y, w = cell_w, h = cell_h,
-                         img_w = img_w, label_h = label_h}
-    tallest = math.max(tallest, cell_h)
-    x = x + cell_w + 2
-  end
+  local cells, total = Layout.sheet(#sprite_table,
+    function(i) return sprite_table:size(i) end,
+    function(label) return font:sizeOf(label) end,
+    screen_width, scale, header_height)
   sheet_layout_cache = {width = screen_width, zoom = scale,
-                        cells = cells, total = y + tallest}
-  return cells, y + tallest
+                        cells = cells, total = total}
+  return cells, total
 end
 
 local function ClampScroll(screen_width, screen_height)
   local cells, total = LayoutSheet(screen_width)
-  local available = math.max(1, screen_height - header_height)
-  local content_height = total - header_height
-  local max_up = math.max(0, content_height - available)
-  y_off = math.min(0, math.max(-max_up, y_off))
+  y_off = Layout.clamp_scroll(total, screen_height, header_height, y_off)
   return cells
 end
 
@@ -939,22 +923,8 @@ local function RenderSheet(canvas, sw, sh)
 end
 
 local function AssemblyBounds()
-  -- A layer may have negative offsets. Include it in the preview instead of
-  -- silently clipping the part that crosses the origin.
-  local min_x, min_y, max_x, max_y = 0, 0, 0, 0
-  for _, item in ipairs(selected) do
-    local w, h = sprite_table:size(item.id)
-    if assembly_mode == "strip" then
-      max_x = max_x + w * item.repeat_count
-      max_y = math.max(max_y, h)
-    else
-      min_x = math.min(min_x, item.dx)
-      min_y = math.min(min_y, item.dy)
-      max_x = math.max(max_x, item.dx + w)
-      max_y = math.max(max_y, item.dy + h)
-    end
-  end
-  return min_x, min_y, max_x, max_y
+  return Layout.assembly_bounds(selected, assembly_mode,
+    function(id) return sprite_table:size(id) end)
 end
 
 local function RenderAssembly(canvas, sw, sh)
@@ -974,20 +944,12 @@ local function RenderAssembly(canvas, sw, sh)
     return
   end
   local min_x, min_y, max_x, max_y = AssemblyBounds()
-  local composite_w = math.max(1, max_x - min_x)
-  local composite_h = math.max(1, max_y - min_y)
-  -- Reserve a stable footer for the selectable component list and focus data.
-  local max_w, max_h = sw, math.max(1, sh - header_height - 100)
-  local fit = math.max(1, math.min(scale, math.floor(max_w / composite_w), math.floor(max_h / composite_h)))
-  if assembly_mode == "strip" then
-    assembly_min_pan_x = math.min(0, sw - composite_w * fit)
-    assembly_pan_x = math.min(0, math.max(assembly_min_pan_x, assembly_pan_x))
-  else
-    assembly_pan_x, assembly_min_pan_x = 0, 0
-  end
-  local start_x = math.max(0, math.floor((sw - composite_w * fit) / 2)) + assembly_pan_x
-  local start_y = header_height + math.max(10,
-    math.floor((max_h - composite_h * fit) / 2))
+  local placement = Layout.assembly_placement(sw, sh, header_height,
+    scale, min_x, min_y, max_x, max_y, assembly_mode, assembly_pan_x)
+  local composite_w, composite_h = placement.width, placement.height
+  local fit = placement.scale
+  assembly_min_pan_x, assembly_pan_x = placement.pan_min, placement.pan_x
+  local start_x, start_y = placement.x, placement.y
   local cursor = 0
   for _, item in ipairs(selected) do
     local w, h = sprite_table:size(item.id)
