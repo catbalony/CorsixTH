@@ -63,4 +63,19 @@ function Assembly.apply(items, id, action, step)
   return true
 end
 
+-- A single bounded setter is reused by drag preview, drag commit and keyboard
+-- actions. It rejects stale IDs and treats no-op coordinates as no change.
+function Assembly.set_offset(items, id, x, y)
+  local _, item = focused(items, id)
+  if not item or type(x) ~= 'number' or type(y) ~= 'number' or
+      x ~= x or y ~= y or x ~= math.floor(x) or y ~= math.floor(y) then
+    return false
+  end
+  x = math.max(-LIMIT, math.min(LIMIT, x))
+  y = math.max(-LIMIT, math.min(LIMIT, y))
+  if item.dx == x and item.dy == y then return false end
+  item.dx, item.dy = x, y
+  return true
+end
+
 return Assembly
