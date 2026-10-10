@@ -78,3 +78,20 @@ verification, run `scripts/native-smoke.py --assembly-edit-check`, preferably
 with `--resize-check --assembly-navigation-check` too. That test checks the
 actual saved recipe for sprite #9's order, repeat count and offsets, not just
 whether buttons rendered. Do not commit screenshots with game artwork.
+
+## v15 — bounded assembly undo/redo
+
+`CorsixTH/Lua/sprite_viewer_history.lua` now owns deep-copied, in-memory
+assembly edit snapshots (32 levels). The viewer must call `History.clear` after
+sprite selection/table/decoding changes or loading a recipe; otherwise Undo
+could resurrect IDs that no longer exist. Use `History.perform` for **both**
+mouse and keyboard assembly edits, including `N` numeric repetition entry.
+Never record pure preview panning. Toolbar buttons, Ctrl+Z, Ctrl+Y and
+Ctrl+Shift+Z are deliberately scoped to assembly mode. Read
+`docs/ASSEMBLY_HISTORY.md` before changing undo behaviour.
+
+Run the local Lua suite and repeat the **native** AppImage test with
+`--assembly-edit-check --assembly-history-check`, ideally also
+`--resize-check --assembly-navigation-check`. The native runner checks the
+actual `.svr`, `.bak1` and `.bak2` files to independently prove Undo/Redo
+mouse and keyboard actions. The GitHub Actions workflow remains manual-only.
