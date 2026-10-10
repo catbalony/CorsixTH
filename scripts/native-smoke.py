@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -117,6 +118,21 @@ class XInputs:
         if mod: self.up(mod)
         time.sleep(.09)
 
+    def resize_window(self, width: int, height: int) -> None:
+        # Xvfb has no window manager, so wmctrl cannot be used. Query the
+        # actual CorsixTH X11 window and resize it via Xlib (not a Lua mock).
+        listing = subprocess.run(['xwininfo', '-root', '-tree'],
+                                 capture_output=True, text=True, check=True).stdout
+        found = re.search(r'(0x[0-9a-fA-F]+) "CorsixTH"', listing)
+        require(found is not None, 'CorsixTH X11 window not found')
+        xid = int(found.group(1), 16)
+        self.x11.XResizeWindow.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                           ctypes.c_uint, ctypes.c_uint]
+        self.x11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        self.x11.XResizeWindow(self.d, xid, width, height)
+        self.x11.XSync(self.d, 0)
+        time.sleep(.6)
+
     def click(self, x: int, y: int) -> None:
         self.xtest.XTestFakeMotionEvent(self.d, -1, x, y, 0)
         self.x11.XFlush(self.d)
@@ -164,7 +180,16 @@ def run(args: argparse.Namespace) -> None:
                 x.key('Return')
                 x.key('g'); x.key('1'); x.key('Return')
                 for _ in range(8): x.key('k', 'Shift_L')
+                if args.resize_check:
+                    # Exercise sheet reflow, not just assembly viewport sizing.
+                    x.resize_window(320, 200)
+                    x.key('x')
+                    x.resize_window(640, 480)
                 x.key('v')
+                if args.resize_check:
+                    x.resize_window(320, 200)
+                    x.key('x')
+                    x.resize_window(640, 480)
                 x.key('s', 'Control_L')
                 x.key('x')
                 time.sleep(.7)
@@ -199,8 +224,15 @@ def run(args: argparse.Namespace) -> None:
             f'native shift-selection did not select ECG frames 1..9: {lines}')
     captured = list(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png'))
     require(captured, 'native SDL screenshot missing')
+    dimensions = set()
     for png in captured:
-        require(png.read_bytes()[:8] == b'\x89PNG\r\n\x1a\n', f'not a valid PNG: {png}')
+        data = png.read_bytes()
+        require(data[:8] == b'\x89PNG\r\n\x1a\n', f'not a valid PNG: {png}')
+        dimensions.add((int.from_bytes(data[16:20], 'big'),
+                        int.from_bytes(data[20:24], 'big')))
+    if args.resize_check:
+        require((320, 200) in dimensions and (640, 480) in dimensions,
+                f'Native screenshots do not reflect SDL resizing: {dimensions}')
     print(f'PASS: real CorsixTH SDL launch, search, range select, 9-frame recipe, screenshot, animation & clean exit')
     print(f'  log: {logfile}\n  recipe: {recipe}\n  native PNGs: {len(captured)}')
 
@@ -213,6 +245,7 @@ def main() -> None:
     p.add_argument('--workdir', type=Path, default=Path('.local-native'), help='gitignored temp native test root')
     p.add_argument('--display', default=None, help='Xvfb display, default :147')
     p.add_argument('--boot-delay', type=float, default=3.5)
+    p.add_argument('--resize-check', action='store_true', help='verify real SDL X11 320x200/640x480 resize and screenshots')
     args = p.parse_args()
     try: run(args)
     except Exception as ex:
