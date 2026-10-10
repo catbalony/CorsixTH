@@ -90,6 +90,7 @@ local browser_hit_boxes = {}
 local recipe_overwrite_confirm = false
 local screenshot_requested = false
 local help_open = false
+local help_page = 1
 
 -- Animation is an INSPECTOR for the ordered checked set, not an editor.
 -- A DAT/TAB table has no animation ranges or frame timing metadata, so FPS,
@@ -107,6 +108,30 @@ local animation_hit_boxes = {}
 
 local function MarkDirty()
   need_draw = true
+end
+
+-- Clip text by the bitmap font's *measured* pixel width, not by string length.
+-- Resource paths and palette names are user data and need not fit in 320 px.
+local function DrawFittedText(canvas, value, x, y, available)
+  if available <= 0 then return end
+  value = tostring(value)
+  if font:sizeOf(value) <= available then
+    font:draw(canvas, value, x, y)
+    return
+  end
+  local suffix = ".."
+  local suffix_width = font:sizeOf(suffix)
+  if suffix_width > available then return end
+  local left, right = 0, #value
+  while left < right do
+    local mid = math.floor((left + right + 1) / 2)
+    if font:sizeOf(value:sub(1, mid)) + suffix_width <= available then
+      left = mid
+    else
+      right = mid - 1
+    end
+  end
+  font:draw(canvas, value:sub(1, left) .. suffix, x, y)
 end
 
 -- Prefer methods exposed by the real CorsixTH SDL surface (0.70.1).
@@ -482,11 +507,19 @@ local function DoKey(_, rawchar, modifiers)
   modifiers = modifiers or {}
   if key == "f1" or key == "?" then
     help_open = not help_open
+    help_page = 1
     MarkDirty()
     return true
   end
   if help_open then
-    if key == "escape" then help_open = false; MarkDirty() end
+    if key == "escape" then
+      help_open = false
+    elseif key == "down" or key == "pagedown" or key == "page down" then
+      help_page = help_page + 1
+    elseif key == "up" or key == "pageup" or key == "page up" then
+      help_page = math.max(1, help_page - 1)
+    end
+    MarkDirty()
     return true
   end
   if browser_kind then return HandleBrowserKey(key) end
@@ -851,18 +884,24 @@ local function DrawViewTabs(canvas, width)
   header_hit_boxes = {}
   local tabs = {{"sheet", "SHEET"}, {"inspector", "DETAIL"},
                 {"assembly", "ASSEMBLY"}, {"animation", "FRAMES"}}
-  local tab_width = width < 520 and 65 or 85
-  local x0 = math.max(4, width - tab_width * #tabs - 2)
+  -- On narrow screens the tabs get their own row rather than covering the
+  -- page title.  At 320x200 all four remain visible and clickable.
+  local compact = width < 520
+  local tab_width = compact and math.min(75, math.floor((width - 8) / #tabs)) or 85
+  local x0 = compact and math.max(2, math.floor((width - tab_width * #tabs) / 2))
+    or math.max(4, width - tab_width * #tabs - 2)
+  local tab_y = compact and 15 or 1
   for i, tab in ipairs(tabs) do
     local x = x0 + (i - 1) * tab_width
     local active = view_mode == tab[1]
     local line = canvas:mapRGB(74, 91, 100)
     local fill = active and canvas:mapRGB(52, 78, 91) or canvas:mapRGB(30, 33, 36)
-    canvas:drawRect(line, x, 1, tab_width - 2, 13)
-    canvas:drawRect(fill, x + 1, 2, tab_width - 4, 11)
-    font:draw(canvas, tab[2], x + 4, 2)
+    canvas:drawRect(line, x, tab_y, tab_width - 2, 13)
+    canvas:drawRect(fill, x + 1, tab_y + 1, tab_width - 4, 11)
+    font:draw(canvas, compact and
+      (tab[1] == "assembly" and "BUILD" or tab[2]) or tab[2], x + 4, tab_y + 1)
     header_hit_boxes[#header_hit_boxes + 1] = {
-      mode = tab[1], x = x, y = 1, w = tab_width - 2, h = 13
+      mode = tab[1], x = x, y = tab_y, w = tab_width - 2, h = 13
     }
   end
 end
@@ -871,27 +910,33 @@ local function DrawNotice(canvas, sw, sh)
   if not notice then return end
   -- Keep assembly chips and animation frame IDs visible below the preview.
   canvas:drawRect(canvas:mapRGB(32, 39, 42), 0, header_height - 15, sw, 15)
-  font:draw(canvas, notice, 4, header_height - 13)
+  DrawFittedText(canvas, notice, 4, header_height - 13, sw - 8)
 end
 
 local function RenderHeader(canvas, width)
   -- Intentionally plain; the sprites are the content, not the UI chrome.
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, width, header_height)
   local path = sprite_table_paths[sprite_table_index]
-  font:draw(canvas, "Sprite viewer", 2, 1)
-  if width < 600 then
-    font:draw(canvas, "A/D table W/S scroll V assembly T frames", 2, 15)
-    font:draw(canvas, "-/= zoom P palette G jump Q exit", 2, 28)
-    font:draw(canvas, path[2] .. "  checked: " .. #selected, 2, 41)
+  if width < 520 then
+    DrawFittedText(canvas, "Sprite viewer  " .. path[2], 2, 1, width - 4)
+    DrawFittedText(canvas, "A/D tables  / find  G jump  F1 help", 2, 29, width - 4)
+    DrawFittedText(canvas, "W/S scroll  P palette  Q exit  checked " .. #selected, 2, 42, width - 4)
+  elseif width < 600 then
+    font:draw(canvas, "Sprite viewer", 2, 1)
+    DrawFittedText(canvas, "A/D table W/S scroll V assembly T frames", 2, 15, width - 4)
+    DrawFittedText(canvas, "-/= zoom P palette G jump Q exit", 2, 28, width - 4)
+    DrawFittedText(canvas, path[2] .. "  checked: " .. #selected, 2, 41, width - 4)
   else
+    font:draw(canvas, "Sprite viewer", 2, 1)
     font:draw(canvas, "A/D tables  / find  W/S scroll  Shift-click range  I detail  V assemble  T frames", 2, 15)
     font:draw(canvas, "-/= zoom  C format  P palette  Shift+P find palette  G jump  F1 help  Q exit", 2, 28)
-    font:draw(canvas, table.concat(path, "/") .. "  " .. (is_complex and "complex" or "simple") ..
-      "  " .. palette_name .. "  zoom " .. scale .. "x  checked: " .. #selected, 2, 41)
+    DrawFittedText(canvas, table.concat(path, "/") .. "  " .. (is_complex and "complex" or "simple") ..
+      "  " .. palette_name .. "  zoom " .. scale .. "x  checked: " .. #selected, 2, 41, width - 4)
   end
   if jump_mode then
-    font:draw(canvas, (jump_mode == "sprite" and "Go to sprite #" or "Repeat count: ") ..
-      jump_text .. "_  [Enter/Esc]", math.max(2, width - 205), 41)
+    local prompt = (jump_mode == "sprite" and "Go #" or "Copies ") .. jump_text .. "_ Enter/Esc"
+    canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, header_height - 16, width, 16)
+    DrawFittedText(canvas, prompt, 3, header_height - 14, width - 6)
   end
 end
 
@@ -930,7 +975,11 @@ end
 local function RenderAssembly(canvas, sw, sh)
   assembly_hit_boxes = {}
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
-  if sw < 600 then
+  if sw < 520 then
+    font:draw(canvas, "Sprite assembly", 2, 2)
+    DrawFittedText(canvas, "V gallery  M strip/layers  J/K item", 2, 29, sw - 4)
+    DrawFittedText(canvas, "Arrows pan/nudge  N copies  F1 help", 2, 42, sw - 4)
+  elseif sw < 600 then
     font:draw(canvas, "Assembly V: gallery M: strip/layers", 2, 2)
     font:draw(canvas, "Click component / J,K focus  ,/. reorder", 2, 16)
     font:draw(canvas, "N: repeat  arrows: pan / nudge  R: reset", 2, 30)
@@ -971,7 +1020,7 @@ local function RenderAssembly(canvas, sw, sh)
   if assembly_min_pan_x < 0 then
     desc = desc .. "  pan " .. -assembly_pan_x .. "/" .. -assembly_min_pan_x
   end
-  font:draw(canvas, desc, 8, sh - 75)
+  DrawFittedText(canvas, desc, 8, sh - 75, sw - 16)
   local active_idx = IndexOf(focus_id) or 1
   local active = selected[active_idx]
   local details = "Focus #" .. active.id .. "  item " .. active_idx .. "/" .. #selected
@@ -980,7 +1029,7 @@ local function RenderAssembly(canvas, sw, sh)
   else
     details = details .. "  offset (" .. active.dx .. "," .. active.dy .. ")"
   end
-  font:draw(canvas, details, 8, sh - 59)
+  DrawFittedText(canvas, details, 8, sh - 59, sw - 16)
   assembly_hit_boxes = {}
   local cell_w = sw < 520 and 56 or 70
   local visible = math.max(1, math.floor((sw - 16) / cell_w))
@@ -1027,7 +1076,11 @@ local function RenderAnimation(canvas, sw, sh)
   local grey = canvas:mapRGB(105, 105, 105)
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
   local path = sprite_table_paths[sprite_table_index]
-  if sw < 600 then
+  if sw < 520 then
+    DrawFittedText(canvas, "Frame preview  " .. path[2], 2, 2, sw - 4)
+    DrawFittedText(canvas, "Space play  Arrows step  T back", 2, 29, sw - 4)
+    DrawFittedText(canvas, "[/] FPS  L loop  H align  F1 help", 2, 42, sw - 4)
+  elseif sw < 600 then
     font:draw(canvas, "Preview  T: back  Space: play", 2, 2)
     font:draw(canvas, "Arrows: step  [/]: FPS  L: loop", 2, 16)
     font:draw(canvas, "- /=: zoom  H: align  " .. path[2], 2, 30)
@@ -1113,10 +1166,16 @@ end
 local function RenderInspector(canvas, sw, sh)
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
   local path = sprite_table_paths[sprite_table_index]
-  font:draw(canvas, "Sprite detail", 2, 2)
-  font:draw(canvas, "Arrows: sprite  Shift+arrows: pan  -/=: zoom  H grid  I back", 2, 16)
-  font:draw(canvas, table.concat(path, "/") .. "  " ..
-    (is_complex and "complex" or "simple") .. "  " .. palette_name, 2, 30)
+  if sw < 520 then
+    DrawFittedText(canvas, "Sprite detail  " .. path[2], 2, 2, sw - 4)
+    DrawFittedText(canvas, "Arrows step  Shift+arrows pan", 2, 29, sw - 4)
+    DrawFittedText(canvas, "-/= zoom  H grid  I back  F1 help", 2, 42, sw - 4)
+  else
+    font:draw(canvas, "Sprite detail", 2, 2)
+    DrawFittedText(canvas, "Arrows: sprite  Shift+arrows: pan  -/=: zoom  H grid  I back", 2, 16, sw - 4)
+    DrawFittedText(canvas, table.concat(path, "/") .. "  " ..
+      (is_complex and "complex" or "simple") .. "  " .. palette_name, 2, 30, sw - 4)
+  end
   local w, h = sprite_table:size(focus_id)
   local fit = math.max(1, math.min(inspector_zoom,
     math.floor((sw - 20) / math.max(1, w)),
@@ -1209,15 +1268,17 @@ local function RenderHelp(canvas, sw, sh)
     "Esc / click: close help.  Original game files stay read-only.",
   }
   local _, fonth = font:sizeOf("X")
-  local step = math.max(10, math.min(17, math.floor((h - 24) / #lines)))
-  for i, line in ipairs(lines) do
-    if i == 1 then
-      canvas:drawRect(canvas:mapRGB(52, 78, 91), x + 5, y + 5, w - 10, 17)
-    end
-    if y + 9 + (i-1)*step < y + h - 10 then
-      font:draw(canvas, line, x + 9, y + 9 + (i-1)*step)
-    end
+  local step = math.max(12, fonth + 3)
+  local per_page = math.max(1, math.floor((h - 34) / step))
+  local total_pages = math.max(1, math.ceil(#lines / per_page))
+  help_page = math.min(help_page, total_pages)
+  local first = (help_page - 1) * per_page + 1
+  canvas:drawRect(canvas:mapRGB(52, 78, 91), x + 5, y + 5, w - 10, 16)
+  for i = first, math.min(#lines, first + per_page - 1) do
+    DrawFittedText(canvas, lines[i], x + 9, y + 9 + (i-first)*step, w - 18)
   end
+  font:draw(canvas, string.format("%d/%d  Up/Down: page  Esc: close",
+    help_page, total_pages), x + 8, y + h - 15)
 end
 
 local function Render(canvas)
