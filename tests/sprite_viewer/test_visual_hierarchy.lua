@@ -66,6 +66,16 @@ local edge=canvas:mapRGB(132,199,206)
 assert(find_rect(edge,function(c) return c.h==1 and c.w>=25 end),
        'assembled component has no active preview outline')
 assert(text_match('Focus #1'),'assembly inspector must identify edited component')
+-- Wheel navigation must have the same focus/preview semantics as J/K, while
+-- retaining independent checked selection state and assembly ordering.
+assert(e.mousewheel(nil, 0, 1) == true)
+render()
+assert(text_match('Focus #0'),'wheel up should focus previous component')
+assert(e.mousewheel(nil, 0, -1) == true)
+render()
+assert(text_match('Focus #1'),'wheel down should focus next component')
+assert(find_rect(edge,function(c) return c.h==1 and c.w>=25 end),
+       'wheel focus must update preview outline')
 key('m');render()
 assert(find_rect(edge,function(c) return c.h==1 and c.w>=25 end),
        'layered component has no active preview outline')
