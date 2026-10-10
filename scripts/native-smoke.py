@@ -63,7 +63,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     for module in ('sprite_viewer.lua', 'sprite_viewer_recipe.lua',
                    'sprite_viewer_browser.lua', 'sprite_viewer_selection.lua',
                    'sprite_viewer_layout.lua', 'sprite_viewer_assembly.lua',
-                   'sprite_viewer_history.lua'):
+                   'sprite_viewer_history.lua', 'sprite_viewer_drag.lua'):
         shutil.copy2(here / 'CorsixTH/Lua' / module, lua_root / module)
     (lua_root / 'debug_script.lua').write_text('corsixth.require("sprite_viewer")()\n')
     # Each invocation gets a fresh output directory. Never accept stale PNGs or
@@ -180,6 +180,33 @@ class XInputs:
         require(w is not None and h is not None, 'Cannot determine CorsixTH window dimensions')
         return int(w.group(1)), int(h.group(1))
 
+    def drag_window(self, x: int, y: int, to_x: int, to_y: int,
+                    modifier: str | None = None) -> None:
+        width, height = self.window_size()
+        require(all(0 <= px < width and 0 <= py < height
+                    for px, py in ((x, y), (to_x, to_y))),
+                'Drag coordinates outside actual SDL window')
+        root_x, root_y = self.window_origin()
+        mod = self.code(modifier) if modifier else None
+        self.xtest.XTestFakeMotionEvent(self.d, -1, root_x + x, root_y + y, 0)
+        self.x11.XFlush(self.d)
+        time.sleep(.18)
+        if mod: self.down(mod)
+        self.xtest.XTestFakeButtonEvent(self.d, 1, 1, 0)
+        self.x11.XFlush(self.d)
+        time.sleep(.13)
+        for n in range(1, 7):
+            px = x + round((to_x - x) * n / 6)
+            py = y + round((to_y - y) * n / 6)
+            self.xtest.XTestFakeMotionEvent(self.d, -1, root_x + px,
+                                            root_y + py, 0)
+            self.x11.XFlush(self.d)
+            time.sleep(.12)
+        self.xtest.XTestFakeButtonEvent(self.d, 1, 0, 0)
+        self.x11.XFlush(self.d)
+        time.sleep(.25)
+        if mod: self.up(mod)
+
     def click_window(self, x: int, y: int) -> None:
         width, height = self.window_size()
         require(0 <= x < width and 0 <= y < height,
@@ -249,6 +276,18 @@ def run(args: argparse.Namespace) -> None:
                     x.resize_window(640, 480)
                     require(x.window_size() == (640, 480), 'Could not restore window size')
                 x.key('v')
+                if args.assembly_drag_check:
+                    require(x.window_size() == (640, 480),
+                            'native layer drag test uses 640x480 drawing coordinates')
+                    x.key('m')  # overlapping ECG frames in layers mode
+                    x.drag_window(300, 215, 317, 224, modifier='Control_L')
+                    x.key('x')
+                    x.key('z', 'Control_L')  # undo the entire drag in one step
+                    x.key('s', 'Control_L')  # save the undone version
+                    x.key('y', 'Control_L')  # redo the whole drag
+                    x.key('m')  # return to strip mode before normal recipe save
+                    x.key('s', 'Control_L')  # confirm overwrite, step 1
+                    x.key('s', 'Control_L')  # confirm overwrite, step 2
                 if args.assembly_navigation_check:
                     # Nine original ECG panels exceed the baseline viewport.
                     # Verify keyboard page transitions and hit-test the real
@@ -377,7 +416,8 @@ def run(args: argparse.Namespace) -> None:
                         # dy=0, demonstrating native clicked Undo/Redo.
                         x.key('s', 'Control_L')
                         x.key('s', 'Control_L')
-                x.key('s', 'Control_L')
+                if not args.assembly_drag_check:
+                    x.key('s', 'Control_L')
                 x.key('x')
                 time.sleep(.7)
                 x.key('t'); x.key('space')
@@ -407,6 +447,17 @@ def run(args: argparse.Namespace) -> None:
     require(recipe.is_file(), 'native viewer did not write the requested recipe')
     lines = recipe.read_text().strip().splitlines()
     require(lines[0] == 'SVR1\tData\tPANEL04V\tcomplex\tstrip', 'incorrect recipe metadata')
+    if args.assembly_drag_check:
+        assert_items = [line.split('\t') for line in lines[1:]]
+        require([int(v[0]) for v in assert_items] == list(range(1,10)),
+                'Drag changed checked membership or component order')
+        require(assert_items[8] == ['9','16','8','1'],
+                f'Ctrl grid-snap drag did not persist source offsets: {assert_items[8]}')
+        prior = screenshots / 'SpriteViewer_Data_PANEL04V.svr.bak1'
+        require(prior.is_file(), 'Undo-state backup recipe missing')
+        prior_items = prior.read_text().strip().splitlines()[1:]
+        require(all(v.split('\t')[1:] == ['0','0','1'] for v in prior_items),
+                'Undo did not restore all original layer offsets')
     if args.assembly_edit_check:
         expected_order = [1,2,3,4,5,6,7,9,8]
         require([int(line.split('\t')[0]) for line in lines[1:]] == expected_order,
@@ -531,6 +582,8 @@ def main() -> None:
                    help='edit copies, order and layer offsets using real SDL mouse events')
     p.add_argument('--assembly-history-check', action='store_true',
                    help='undo/redo native assembly edits, assert saved backup/final recipes')
+    p.add_argument('--assembly-drag-check', action='store_true',
+                   help='drag top layer with Ctrl grid snapping; verify undo backup and final recipe')
     p.add_argument('--assembly-pick-check', action='store_true',
                    help='click composited sprites and Shift-cycle overlapping layers with native PNG focus checks')
     args = p.parse_args()
