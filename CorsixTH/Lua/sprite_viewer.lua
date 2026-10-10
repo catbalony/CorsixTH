@@ -336,21 +336,21 @@ end
 local function LayoutSheet(screen_width)
   local cache = sheet_layout_cache
   if cache and cache.width == screen_width and cache.zoom == scale then
-    return cache.cells, cache.total
+    return cache.cells, cache.total, cache.rows
   end
-  local cells, total = Layout.sheet(#sprite_table,
+  local cells, total, rows = Layout.sheet(#sprite_table,
     function(i) return sprite_table:size(i) end,
     function(label) return font:sizeOf(label) end,
     screen_width, scale, header_height)
   sheet_layout_cache = {width = screen_width, zoom = scale,
-                        cells = cells, total = total}
-  return cells, total
+                        cells = cells, total = total, rows = rows}
+  return cells, total, rows
 end
 
 local function ClampScroll(screen_width, screen_height)
-  local cells, total = LayoutSheet(screen_width)
+  local cells, total, rows = LayoutSheet(screen_width)
   y_off = Layout.clamp_scroll(total, screen_height, header_height, y_off)
-  return cells
+  return cells, rows
 end
 
 local function ShowSprite(id)
@@ -358,14 +358,12 @@ local function ShowSprite(id)
   selection_anchor = focus_id
   local sw, sh = GetViewerSize(TheApp.video)
   local cells = ClampScroll(sw, sh)
-  for _, c in ipairs(cells) do
-    if c.id == focus_id then
-      local top = c.y + y_off
-      if top < header_height then y_off = header_height - c.y end
-      if top + c.h > sh then y_off = sh - (c.y + c.h) end
-      ClampScroll(sw, sh)
-      break
-    end
+  local c = cells[focus_id + 1]
+  if c then
+    local top = c.y + y_off
+    if top < header_height then y_off = header_height - c.y end
+    if top + c.h > sh then y_off = sh - (c.y + c.h) end
+    ClampScroll(sw, sh)
   end
   MarkDirty()
 end
@@ -899,8 +897,10 @@ end
 
 local function RenderSheet(canvas, sw, sh)
   hit_boxes = {}
-  local cells = ClampScroll(sw, sh)
-  for _, c in ipairs(cells) do
+  local cells, rows = ClampScroll(sw, sh)
+  local first, last = Layout.visible_range(rows, y_off, header_height, sh)
+  for index = first, last do
+    local c = cells[index]
     local y = c.y + y_off
     if y >= header_height and y < sh and y + c.h > header_height then
       local checked = selected_lookup[c.id] == true
@@ -1349,7 +1349,8 @@ local function open()
     buttonup = IgnoreViewerEvent,
     motion = IgnoreViewerEvent,
     active = DoActive,
-    window_resize = DoWindowResize,
+    window_resize = DoWindowResize, -- legacy alias for older event dispatchers
+    window_resized = DoWindowResize, -- CorsixTH SDL3 dispatcher
     window_pixel_size_changed = DoWindowResize,
     window_display_scale_changed = DoWindowResize,
     mousewheel = DoMouseWheel,

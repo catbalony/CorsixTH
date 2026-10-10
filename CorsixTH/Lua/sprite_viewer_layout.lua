@@ -4,8 +4,12 @@
 -- A sprite dimension callback is used because original sheets are lazy-loaded.
 local Layout = {}
 
+-- Index row boundaries while doing the initial sheet layout.  Layout is
+-- cached by table, zoom and viewport width; rows let redraws visit only the
+-- visible portion, without a linear scan through every sprite each frame.
 function Layout.sheet(count, size_of, text_size, width, zoom, header_height)
-  local x, y, tallest, cells = 0, header_height, 0, {}
+  local x, y, tallest, cells, rows = 0, header_height, 0, {}, {}
+  local row_first = 1
   for id = 0, count - 1 do
     local w, h = size_of(id)
     local image_w, image_h = w * zoom, h * zoom
@@ -13,14 +17,46 @@ function Layout.sheet(count, size_of, text_size, width, zoom, header_height)
     local cell_w = math.max(image_w, label_w + 18, 28) + 6
     local cell_h = image_h + label_h + 7
     if x > 0 and x + cell_w > width then
+      rows[#rows + 1] = {first = row_first, last = #cells,
+        y = y, bottom = y + tallest}
       x, y, tallest = 0, y + tallest, 0
+      row_first = #cells + 1
     end
     cells[#cells + 1] = {id = id, x = x, y = y, w = cell_w,
       h = cell_h, img_w = image_w, label_h = label_h}
     tallest = math.max(tallest, cell_h)
     x = x + cell_w + 2
   end
-  return cells, y + tallest
+  if #cells >= row_first then
+    rows[#rows + 1] = {first = row_first, last = #cells,
+      y = y, bottom = y + tallest}
+  end
+  return cells, y + tallest, rows
+end
+
+-- Return 1-based cell indices.  All sprites in the same row have the same y,
+-- so binary searching row ends finds the first possibly visible row, then
+-- only rows intersecting the viewport are visited. No per-frame allocations.
+function Layout.visible_range(rows, scroll, header_height, screen_height)
+  local viewport_top = header_height - scroll
+  local viewport_bottom = screen_height - scroll
+  local low, high = 1, #rows
+  while low <= high do
+    local mid = math.floor((low + high) / 2)
+    if rows[mid].bottom <= viewport_top then
+      low = mid + 1
+    else
+      high = mid - 1
+    end
+  end
+  if low > #rows or rows[low].y >= viewport_bottom then
+    return 1, 0
+  end
+  local last = low
+  while last < #rows and rows[last + 1].y < viewport_bottom do
+    last = last + 1
+  end
+  return rows[low].first, rows[last].last
 end
 
 function Layout.clamp_scroll(total, viewport_height, header_height, offset)
