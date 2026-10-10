@@ -74,6 +74,7 @@ local assembly_history = History.new(32) -- bounded; no disk writes
 local selection_anchor = nil -- first click/jump of a Shift-click range
 local hit_boxes = {}
 local assembly_hit_boxes = {}
+local assembly_preview_rects = {}
 local sheet_layout_cache = nil
 local header_height = 56
 local entry_height = 0
@@ -970,6 +971,18 @@ local function DoMouseDown(_, button, x, y)
         return true
       end
     end
+    local _, sh = GetViewerSize(TheApp.video)
+    local mods = (SDL.getKeyModifiers and SDL.getKeyModifiers()) or {}
+    local index, overlap = Layout.assembly_pick(assembly_preview_rects,
+      x, y, IndexOf(focus_id), assembly_mode == "layers" and mods.shift,
+      header_height, sh - 109)
+    if index then
+      FocusAssemblyIndex(index)
+      if assembly_mode == "layers" and overlap > 1 then
+        notice = "Overlapping layers " .. overlap .. ": Shift+click cycles below"
+      end
+      return true
+    end
     return false
   end
   if view_mode == "animation" then
@@ -1150,19 +1163,23 @@ end
 
 local function RenderAssembly(canvas, sw, sh)
   assembly_hit_boxes = {}
+  assembly_preview_rects = {}
   canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
   if sw < 520 then
     font:draw(canvas, "Sprite assembly", 2, 2)
     DrawFittedText(canvas, assembly_mode .. "  " .. #selected ..
       " parts   focus #" .. focus_id, 2, 29, sw - 4)
-    DrawFittedText(canvas, "J/K or wheel focus  PgUp/Dn page  F1", 2, 42, sw - 4)
+    DrawFittedText(canvas, "Click art  J/K/wheel focus  F1", 2, 42, sw - 4)
   elseif sw < 600 then
     font:draw(canvas, "Sprite assembly", 2, 2)
     DrawFittedText(canvas, "Click item  J/K/wheel focus  M mode  F1", 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery", 2, 30, sw - 4)
   else
     font:draw(canvas, "Sprite assembly", 2, 2)
-    DrawFittedText(canvas, "Click overview  J/K/wheel focus  PgUp/Dn pages  M mode  F1", 2, 16, sw - 4)
+    local hint = assembly_mode == "layers" and
+      "Click artwork to focus  Shift+click cycles overlaps  J/K focus  F1" or
+      "Click artwork or overview  J/K/wheel focus  PgUp/Dn  F1"
+    DrawFittedText(canvas, hint, 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery  X capture", 2, 30, sw - 4)
   end
   if #selected == 0 then
@@ -1175,30 +1192,25 @@ local function RenderAssembly(canvas, sw, sh)
   local composite_w, composite_h = placement.width, placement.height
   local fit = placement.scale
   assembly_min_pan_x, assembly_pan_x = placement.pan_min, placement.pan_x
-  local start_x, start_y = placement.x, placement.y
   local active_idx = IndexOf(focus_id) or 1
-  local active_rect
-  local cursor = 0
+  local size_of = function(id) return sprite_table:size(id) end
+  assembly_preview_rects = Layout.assembly_rects(selected, assembly_mode,
+    size_of, placement, min_x, min_y)
   for i, item in ipairs(selected) do
-    local w, h = sprite_table:size(item.id)
+    local rect = assembly_preview_rects[i]
     if assembly_mode == "strip" then
-      local left = start_x + cursor * fit
-      for _ = 1, item.repeat_count do
-        sprite_table:draw(canvas, item.id, start_x + cursor * fit,
-          start_y + (composite_h - h) * fit, {scaleFactor = fit})
-        cursor = cursor + w
-      end
-      if i == active_idx then
-        active_rect = {left, start_y + (composite_h - h) * fit,
-          w * item.repeat_count * fit, h * fit}
+      local w = sprite_table:size(item.id)
+      for copy = 0, item.repeat_count - 1 do
+        sprite_table:draw(canvas, item.id, rect.x + copy * w * fit,
+          rect.y, {scaleFactor = fit})
       end
     else
-      local x, y = start_x + (item.dx - min_x) * fit,
-        start_y + (item.dy - min_y) * fit
-      sprite_table:draw(canvas, item.id, x, y, {scaleFactor = fit})
-      if i == active_idx then active_rect = {x, y, w * fit, h * fit} end
+      sprite_table:draw(canvas, item.id, rect.x, rect.y, {scaleFactor = fit})
     end
   end
+  local focused_rect = assembly_preview_rects[active_idx]
+  local active_rect = focused_rect and {focused_rect.x, focused_rect.y,
+    focused_rect.w, focused_rect.h}
   -- Emphasise the component being edited, including all repeated strip copies.
   -- This overlay belongs solely to the inspector: no original pixels change.
   if active_rect then
@@ -1240,7 +1252,8 @@ local function RenderAssembly(canvas, sw, sh)
   if assembly_mode == "strip" then
     details = details .. "  copies " .. active.repeat_count
   else
-    details = details .. "  offset (" .. active.dx .. "," .. active.dy .. ")"
+    details = details .. "  offset (" .. active.dx .. "," .. active.dy .. ")" ..
+      "  layer " .. active_idx .. "/" .. #selected
   end
   local _, _, page_number, page_count = Layout.assembly_page(
     active_idx, #selected, AssemblyPageCapacity())
@@ -1498,6 +1511,7 @@ local function RenderHelp(canvas, sw, sh)
     "Assembly: V toggle   M strip/layers   ,/. reorder",
     "          J/K focus  PgUp/Dn pages  Home/End ends",
     "          Click overview track to seek wide strips",
+    "          Click artwork to focus  Shift+click cycles overlap",
     "          Edit buttons: order, copies, XY offsets, reset",
     "          Undo Ctrl+Z   Redo Ctrl+Y / Ctrl+Shift+Z",
     "          arrows pan/nudge   Shift+arrows x8   N copies",

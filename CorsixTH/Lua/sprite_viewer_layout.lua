@@ -102,6 +102,58 @@ function Layout.assembly_placement(sw, sh, header_height, zoom,
           pan_x = pan, pan_min = pan_min, x = x, y = y}
 end
 
+-- These rectangles are shared by drawing and picking. A strip component owns
+-- one rectangle covering all repeated copies, while layers have one rectangle
+-- per source sprite (the last layer is rendered above earlier ones).
+-- The rects are local preview coordinates, not persistent recipe offsets.
+function Layout.assembly_rects(items, mode, size_of, placement, min_x, min_y)
+  local result, cursor = {}, 0
+  local zoom = placement.scale
+  for i, item in ipairs(items) do
+    local w, h = size_of(item.id)
+    local x, y, rect_w
+    if mode == 'strip' then
+      x = placement.x + cursor * zoom
+      y = placement.y + (placement.height - h) * zoom
+      rect_w = w * item.repeat_count * zoom
+      cursor = cursor + w * item.repeat_count
+    else
+      x = placement.x + (item.dx - min_x) * zoom
+      y = placement.y + (item.dy - min_y) * zoom
+      rect_w = w * zoom
+    end
+    result[i] = {index = i, id = item.id, x = x, y = y,
+      w = rect_w, h = h * zoom}
+  end
+  return result
+end
+
+-- Bounding-box picking, not per-pixel alpha testing: sprite table draw() does
+-- not expose a transparency mask. Ignore zero-sized sprites and any area
+-- covered by the inspector header/footer. In layers, reverse draw order to
+-- select the visual frontmost item; Shift-click cycles *under* the focus.
+function Layout.assembly_pick(rects, x, y, focused_index, cycle,
+                              preview_top, preview_bottom)
+  if y < preview_top or y >= preview_bottom then return nil end
+  local matches = {}
+  for i = #rects, 1, -1 do
+    local r = rects[i]
+    if r.w > 0 and r.h > 0 and x >= r.x and x < r.x + r.w and
+        y >= r.y and y < r.y + r.h then
+      matches[#matches + 1] = r.index
+    end
+  end
+  if #matches == 0 then return nil end
+  if cycle and #matches > 1 then
+    for i, index in ipairs(matches) do
+      if index == focused_index then
+        return matches[i % #matches + 1], #matches
+      end
+    end
+  end
+  return matches[1], #matches
+end
+
 -- Compact, predictable editing toolbar. The geometry is independent of
 -- SDL, and the action names are implemented by sprite_viewer_assembly.lua.
 -- It deliberately omits copy controls in layers mode: repeat_count affects
