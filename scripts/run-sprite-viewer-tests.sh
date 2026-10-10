@@ -18,3 +18,4 @@ fi
 "${runner[@]}" tests/sprite_viewer/test_virtual_viewer.lua
 "${runner[@]}" tests/sprite_viewer/test_compact_recovery.lua
 "${runner[@]}" tests/sprite_viewer/test_visual_hierarchy.lua
+"${runner[@]}" tests/sprite_viewer/test_assembly_navigation.lua

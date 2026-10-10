@@ -133,6 +133,21 @@ class XInputs:
         self.x11.XSync(self.d, 0)
         time.sleep(.6)
 
+    def window_origin(self) -> tuple[int, int]:
+        # SDL's 640x480 window does not necessarily start at X11 origin (0,0).
+        # Resolve screen coordinates before testing mouse-driven overview input.
+        listing = subprocess.run(['xwininfo', '-root', '-tree'],
+                                 capture_output=True, text=True, check=True).stdout
+        found = re.search(r'(0x[0-9a-fA-F]+) "CorsixTH"', listing)
+        require(found is not None, 'Cannot locate the CorsixTH X11 window')
+        info = subprocess.run(['xwininfo', '-id', found.group(1)],
+                              capture_output=True, text=True, check=True).stdout
+        left = re.search(r'Absolute upper-left X:\s*(-?\d+)', info)
+        top = re.search(r'Absolute upper-left Y:\s*(-?\d+)', info)
+        require(left is not None and top is not None,
+                'Cannot resolve CorsixTH X11 window origin')
+        return int(left.group(1)), int(top.group(1))
+
     def click(self, x: int, y: int) -> None:
         self.xtest.XTestFakeMotionEvent(self.d, -1, x, y, 0)
         self.x11.XFlush(self.d)
@@ -186,6 +201,20 @@ def run(args: argparse.Namespace) -> None:
                     x.key('x')
                     x.resize_window(640, 480)
                 x.key('v')
+                if args.assembly_navigation_check:
+                    # Nine original ECG panels exceed a 640-pixel viewport.
+                    # Verify keyboard page transitions and hit-test the real
+                    # proportional overview at the bottom of the SDL window.
+                    x.key('x')  # focus initially on #9
+                    x.key('Home'); x.key('x')
+                    x.key('End'); x.key('x')
+                    x.key('Page_Up'); x.key('x')
+                    x.key('Page_Down'); x.key('x')
+                    root_x, root_y = x.window_origin()
+                    x.click(root_x + 12, root_y + 438)
+                    x.key('x')
+                    x.click(root_x + 628, root_y + 438)
+                    x.key('x')
                 if args.resize_check:
                     x.resize_window(320, 200)
                     x.key('x')
@@ -233,6 +262,12 @@ def run(args: argparse.Namespace) -> None:
     if args.resize_check:
         require((320, 200) in dimensions and (640, 480) in dimensions,
                 f'Native screenshots do not reflect SDL resizing: {dimensions}')
+    if args.assembly_navigation_check:
+        import hashlib
+        unique = {hashlib.sha256(png.read_bytes()).digest() for png in captured}
+        require(len(captured) >= 7 and len(unique) >= 4,
+                f'Assembly navigation did not produce distinct native frames: '
+                f'{len(unique)} distinct / {len(captured)} captures')
     print(f'PASS: real CorsixTH SDL launch, search, range select, 9-frame recipe, screenshot, animation & clean exit')
     print(f'  log: {logfile}\n  recipe: {recipe}\n  native PNGs: {len(captured)}')
 
@@ -246,6 +281,8 @@ def main() -> None:
     p.add_argument('--display', default=None, help='Xvfb display, default :147')
     p.add_argument('--boot-delay', type=float, default=3.5)
     p.add_argument('--resize-check', action='store_true', help='verify real SDL X11 320x200/640x480 resize and screenshots')
+    p.add_argument('--assembly-navigation-check', action='store_true',
+                   help='exercise stable assembly pages and click the overview in real X11')
     args = p.parse_args()
     try: run(args)
     except Exception as ex:
