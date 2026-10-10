@@ -16,14 +16,19 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE. --]]
+SOFTWARE.
+--]]
 
--- This is a poor replacement for the sprite viewing facility of AnimView, but
--- when you don't have a copy of AnimView, or the means to compile it, then a
--- crude sprite viewer is better than no sprite viewer.
+-- This remains a debug sprite contact sheet, not a second editor or player.
+-- Optional inspection modes compose a checked set of sprites or preview it as
+-- frames. The contact sheet remains the default interface. Nothing is inferred
+-- about animation sequences: the user chooses the frames and their order.
+-- References: XCC Mixer SHP video viewer, OpenRA sequences, SLADE composite
+-- patches, and Aseprite's optional timeline and frame-range playback.
 
 local is_open = false
 local gfx = TheApp.gfx
+local SDL = rawget(_G, "SDL") or require("sdl")
 local font -- Set on open
 local need_draw = true
 local sprite_table_paths = {}
@@ -37,7 +42,7 @@ local wdown = false
 local sdown = false
 local scale = 1
 local bg_colour_index = 1
-local y_off
+local y_off = 0
 local old_event_handlers
 local old_gfx_cache = {}
 local sprite_viewer_gfx_cache = {}
@@ -51,12 +56,232 @@ local background_colours = {
   Colours.Yellow,
 }
 
+-- New state lives in this file; no changes to game resources or C++ required.
+local view_mode = "sheet" -- sheet / assembly / animation
+local assembly_mode = "strip" -- strip / layers
+local assembly_pan_x = 0 -- viewport offset; source sprite offsets never change
+local assembly_min_pan_x = 0
+local focus_id = 0
+local selected = {}  -- list of {id, dx, dy, repeat_count} in selection order
+local selected_lookup = {} -- constant-time checkbox rendering, even for large tables
+local selection_anchor = nil -- first click/jump of a Shift-click range
+local hit_boxes = {}
+local assembly_hit_boxes = {}
+local sheet_layout_cache = nil
+local header_height = 56
+local entry_height = 0
+local jump_mode = nil -- "sprite" or "copies"; nil when typing normally
+local jump_text = ""
+local notice = nil
+local inspector_zoom = 4
+local inspector_pan_x, inspector_pan_y = 0, 0
+local inspector_checkerboard = true
+local inspector_return_view = "sheet"
+local header_hit_boxes = {}
+local browser_kind = nil -- "table" or "palette"
+local browser_query = ""
+local browser_cursor = 1
+local browser_results = {}
+local browser_hit_boxes = {}
+local recipe_overwrite_confirm = false
+local screenshot_requested = false
+local help_open = false
+
+-- Animation is an INSPECTOR for the ordered checked set, not an editor.
+-- A DAT/TAB table has no animation ranges or frame timing metadata, so FPS,
+-- playback mode and sequence are explicitly user-controlled assumptions.
+local animation_return_view = "sheet"
+local animation_index = 1           -- 1-based index in selected[]
+local animation_playing = false
+local animation_fps = 8
+local animation_zoom = 4  -- separate from gallery zoom
+local animation_mode = "loop"       -- loop / once / pingpong
+local animation_direction = 1
+local animation_anchor = "bottom"   -- bottom / centre / top
+local animation_last_tick = nil
+local animation_hit_boxes = {}
+
+local function MarkDirty()
+  need_draw = true
+end
+
+-- Prefer methods exposed by the real CorsixTH SDL surface (0.70.1).
+-- Older test doubles and engines may provide getRenderSize instead.
+local function GetViewerSize(canvas)
+  if canvas.getWidth and canvas.getHeight then
+    return canvas:getWidth(), canvas:getHeight()
+  end
+  return canvas:getRenderSize()
+end
+
+local function GetTimeMs()
+  return SDL.getTicks()
+end
+
+local function ResetAnimation()
+  animation_index = 1
+  animation_playing = false
+  animation_direction = 1
+  animation_last_tick = nil
+  animation_hit_boxes = {}
+end
+
+local function OpenAnimation()
+  animation_return_view = view_mode
+  view_mode = "animation"
+  ResetAnimation()
+  MarkDirty()
+end
+
+local function CloseAnimation()
+  view_mode = animation_return_view
+  ResetAnimation()
+  MarkDirty()
+end
+
+local function SelectAnimationFrame(index)
+  if #selected == 0 then
+    animation_index = 1
+  else
+    animation_index = (index - 1) % #selected + 1
+  end
+  animation_direction = 1
+  animation_last_tick = GetTimeMs()
+  MarkDirty()
+end
+
+local function AdvanceAnimationFrame()
+  local count = #selected
+  if count < 2 then
+    animation_playing = false
+    return
+  end
+  if animation_mode == "loop" then
+    animation_index = animation_index % count + 1
+  elseif animation_mode == "once" then
+    if animation_index >= count - 1 then
+      animation_index = count
+      animation_playing = false
+    else
+      animation_index = animation_index + 1
+    end
+  else -- pingpong: endpoints are not duplicated on direction reversal
+    if animation_index == count then animation_direction = -1 end
+    if animation_index == 1 then animation_direction = 1 end
+    animation_index = animation_index + animation_direction
+  end
+end
+
+local function ToggleAnimationPlayback()
+  if #selected < 2 then
+    animation_playing = false
+    MarkDirty()
+    return
+  end
+  if not animation_playing and animation_mode == "once" and
+      animation_index == #selected then
+    animation_index = 1
+  end
+  animation_playing = not animation_playing
+  animation_last_tick = GetTimeMs()
+  MarkDirty()
+end
+
+
+local function IndexOf(id)
+  for i, item in ipairs(selected) do
+    if item.id == id then return i end
+  end
+end
+
+local function ToggleSelection(id)
+  local i = IndexOf(id)
+  if i then
+    table.remove(selected, i)
+    selected_lookup[id] = nil
+  else
+    selected[#selected + 1] = {id = id, dx = 0, dy = 0, repeat_count = 1}
+    selected_lookup[id] = true
+  end
+  focus_id = id
+  selection_anchor = id
+  if animation_index > #selected then animation_index = math.max(1, #selected) end
+  MarkDirty()
+end
+
+-- Shift-click adds an inclusive, numerically ordered range. Explicitly keep
+-- source IDs and existing per-sprite offsets/repeats rather than duplicating
+-- a checked sprite. Assembly still uses the resulting ordered selection.
+local function SelectRange(anchor, target)
+  if not anchor then anchor = target end
+  local first, last = math.min(anchor, target), math.max(anchor, target)
+  local old_by_id = {}
+  local retained = {}
+  for _, item in ipairs(selected) do
+    old_by_id[item.id] = item
+    if item.id < first or item.id > last then
+      retained[#retained + 1] = item
+    end
+  end
+  for id = first, last do
+    retained[#retained + 1] = old_by_id[id] or
+      {id = id, dx = 0, dy = 0, repeat_count = 1}
+    selected_lookup[id] = true
+  end
+  selected = retained
+  focus_id = target
+  selection_anchor = anchor
+  MarkDirty()
+end
+
+-- Batch operations share the same canonical selected[] / selected_lookup model.
+-- Bound the request, rather than freezing the UI on enormous sprite tables.
+local MAX_BULK_SELECTION = 2048
+local function BulkSelect(invert)
+  if #sprite_table > MAX_BULK_SELECTION then
+    notice = string.format("%d sprites: bulk selection limited to %d", #sprite_table, MAX_BULK_SELECTION)
+    MarkDirty()
+    return
+  end
+  local next_selection, lookup, old_by_id = {}, {}, {}
+  for _, item in ipairs(selected) do old_by_id[item.id] = item end
+  for id = 0, #sprite_table - 1 do
+    local existing = old_by_id[id]
+    local include = invert and not existing or not invert
+    if include then
+      next_selection[#next_selection + 1] = existing or
+        {id = id, dx = 0, dy = 0, repeat_count = 1}
+      lookup[id] = true
+    end
+  end
+  selected, selected_lookup = next_selection, lookup
+  animation_index = 1
+  notice = string.format("%d sprites checked", #selected)
+  MarkDirty()
+end
+
+local function ClearSelection()
+  selected, selected_lookup = {}, {}
+  selection_anchor = nil
+  animation_index = 1
+  notice = "Selection cleared"
+  MarkDirty()
+end
+
+local function FocusSelected(direction)
+  if #selected == 0 then return end
+  local index = IndexOf(focus_id) or 1
+  index = (index - 1 + direction + #selected) % #selected + 1
+  focus_id = selected[index].id
+  MarkDirty()
+end
+
 for _, dir in ipairs({"Data", "QData", "DataM", "QDataM"}) do
   for item in pairs(TheApp.fs:listFiles(dir) or {}) do
     if item:match("%.TAB$") then
       local basename = item:sub(1, -5)
       if TheApp.fs:fileExists(dir, basename .. ".DAT") then
-        sprite_table_paths[#sprite_table_paths + 1] = {dir, item:sub(1, -5)}
+        sprite_table_paths[#sprite_table_paths + 1] = {dir, basename}
       else
         print("Sprite table " .. dir .. "/" .. item .. " has no matching .DAT file. Skipping.")
       end
@@ -67,35 +292,21 @@ table.sort(sprite_table_paths, function(lhs, rhs)
   return lhs[1] < rhs[1] or (lhs[1] == rhs[1] and lhs[2] < rhs[2])
 end)
 
-for name, _ in pairs(TheApp.gfx:allPalettes()) do
+for name in pairs(TheApp.gfx:allPalettes()) do
   palettes[#palettes + 1] = name
 end
 table.sort(palettes)
 
 for i, name in ipairs(palettes) do
-  if name == "MPalette.dat" then
-    mpalette_index = i
-    break
-  end
+  if name == "MPalette.dat" then mpalette_index = i; break end
 end
 
--- Find the palette with the longest common prefix with the sprite table path,
--- as this is likely the correct palette to use for the sprite table.
--- Avoids hardcoding a mapping of sprites to palettes and accounts for THs
--- naming e.g. AWARD01.PAL and AWARD02.PAL used for AWARD03.TAB
---
---!param sprite_table_name (string) The name of the sprite table, without the
---        .TAB extension
---!return (number) The index of the closest matching palette in the palettes
 local function closest_matching_palette(sprite_table_name)
-  local best_score = 0
-  local best_index
+  local best_score, best_index = 0, nil
   local lower_st = sprite_table_name:lower()
-
   for i, pal_name in ipairs(palettes) do
     local score = 0
     local lower_pal = pal_name:lower()
-
     for j = 3, math.min(#lower_pal, #lower_st) do
       if lower_pal:sub(1, j) == lower_st:sub(1, j) then
         score = j
@@ -103,132 +314,1163 @@ local function closest_matching_palette(sprite_table_name)
         break
       end
     end
-    if score > best_score then
-      best_score = score
-      best_index = i
-    end
+    if score > best_score then best_score, best_index = score, i end
   end
-
   return best_index
 end
 
+-- Game-side callers load the HUD/PullDown/Watch tables in complex mode.
+-- These are verified in CorsixTH's actual game Lua and PANEL04V live rendering.
+-- Keep the manual C toggle for resources whose format is not known.
+local complex_panel_tables = {
+  PANEL02V = true, PANEL04V = true, PANEL02M = true,
+  PULLDV = true, PULLDM = true,
+  WATCH01V = true, WATCH01M = true,
+}
+
+local function DefaultComplex(path)
+  return complex_panel_tables[path[2]:upper()] or false
+end
+
 local function LoadTable(n, complex, detect_palette)
+  if not sprite_table_paths[n] then return end
   sprite_table_index = n
-  is_complex = complex
   local path = sprite_table_paths[n]
-  local pal
+  if complex == nil then complex = DefaultComplex(path) end
+  is_complex = complex
   if detect_palette then
-    palette_index = closest_matching_palette(path[2]) or mpalette_index
+    palette_index = closest_matching_palette(path[2]) or mpalette_index or 1
   end
   palette_name = palettes[palette_index]
-  pal = gfx:getPalette(palette_name)
-  sprite_table = gfx:loadSpriteTable(path[1], path[2], complex, pal)
-  need_draw = true
+  sprite_table = gfx:loadSpriteTable(path[1], path[2], complex, gfx:getPalette(palette_name))
+  sheet_layout_cache = nil
   y_off = 0
+  focus_id = 0
+  selected = {}
+  selected_lookup = {}
+  selection_anchor = nil
+  assembly_pan_x = 0
+  assembly_min_pan_x = 0
+  jump_mode = nil
+  notice = nil
+  browser_kind = nil
+  view_mode = "sheet"
+  ResetAnimation()
+  MarkDirty()
 end
-LoadTable(1, false, true)
+LoadTable(1, nil, true)
 
-local function DoKey(_, rawchar)
+local function ReLoadSameTable()
+  -- Keep selections and scroll when simply changing the palette or decoding.
+  local path = sprite_table_paths[sprite_table_index]
+  palette_name = palettes[palette_index]
+  sprite_table = gfx:loadSpriteTable(path[1], path[2], is_complex, gfx:getPalette(palette_name))
+  sheet_layout_cache = nil
+  -- A decoding-mode switch may change how many entries exist.
+  local available = #sprite_table
+  for i = #selected, 1, -1 do
+    if selected[i].id >= available then
+      selected_lookup[selected[i].id] = nil
+      table.remove(selected, i)
+    end
+  end
+  focus_id = math.max(0, math.min(focus_id, available - 1))
+  if selection_anchor and selection_anchor >= available then
+    selection_anchor = nil
+  end
+  if animation_index > #selected then animation_index = math.max(1, #selected) end
+  MarkDirty()
+end
+
+local function LayoutSheet(screen_width)
+  local cache = sheet_layout_cache
+  if cache and cache.width == screen_width and cache.zoom == scale then
+    return cache.cells, cache.total
+  end
+  local x, y = 0, header_height
+  local tallest = 0
+  local cells = {}
+  for i = 0, #sprite_table - 1 do
+    local w, h = sprite_table:size(i)
+    local img_w, img_h = w * scale, h * scale
+    local label_w, label_h = font:sizeOf("#" .. i .. " " .. w .. "x" .. h)
+    local cell_w = math.max(img_w, label_w + 18, 28) + 6
+    local cell_h = img_h + label_h + 7
+    if x > 0 and x + cell_w > screen_width then
+      x, y = 0, y + tallest
+      tallest = 0 -- Fix original wrapping bug (tallest previously persisted)
+    end
+    cells[#cells + 1] = {id = i, x = x, y = y, w = cell_w, h = cell_h,
+                         img_w = img_w, label_h = label_h}
+    tallest = math.max(tallest, cell_h)
+    x = x + cell_w + 2
+  end
+  sheet_layout_cache = {width = screen_width, zoom = scale,
+                        cells = cells, total = y + tallest}
+  return cells, y + tallest
+end
+
+local function ClampScroll(screen_width, screen_height)
+  local cells, total = LayoutSheet(screen_width)
+  local available = math.max(1, screen_height - header_height)
+  local content_height = total - header_height
+  local max_up = math.max(0, content_height - available)
+  y_off = math.min(0, math.max(-max_up, y_off))
+  return cells
+end
+
+local function ShowSprite(id)
+  focus_id = math.max(0, math.min(#sprite_table - 1, id))
+  selection_anchor = focus_id
+  local sw, sh = GetViewerSize(TheApp.video)
+  local cells = ClampScroll(sw, sh)
+  for _, c in ipairs(cells) do
+    if c.id == focus_id then
+      local top = c.y + y_off
+      if top < header_height then y_off = header_height - c.y end
+      if top + c.h > sh then y_off = sh - (c.y + c.h) end
+      ClampScroll(sw, sh)
+      break
+    end
+  end
+  MarkDirty()
+end
+
+-- A single searchable picker handles resource names and palettes. This is a
+-- navigation overlay, not a permanent sidebar; it preserves the contact sheet.
+local function UpdateBrowserResults()
+  browser_results = {}
+  local needle = browser_query:lower()
+  local values = browser_kind == "table" and sprite_table_paths or palettes
+  for i, value in ipairs(values) do
+    local label = browser_kind == "table" and table.concat(value, "/") or value
+    if label:lower():find(needle, 1, true) then
+      browser_results[#browser_results + 1] = {index = i, text = label}
+    end
+  end
+  browser_cursor = math.max(1, math.min(browser_cursor, #browser_results))
+end
+
+local function OpenBrowser(kind)
+  browser_kind, browser_query, browser_cursor = kind, "", 1
+  UpdateBrowserResults()
+  MarkDirty()
+end
+
+local function ChooseBrowserItem()
+  local hit = browser_results[browser_cursor]
+  if not hit then return end
+  local kind = browser_kind
+  browser_kind = nil
+  if kind == "table" then
+    LoadTable(hit.index, nil, true)
+  else
+    palette_index = hit.index
+    gfx.cache.tabled = {}
+    ReLoadSameTable()
+  end
+  MarkDirty()
+end
+
+local function HandleBrowserKey(key)
+  if key == "escape" then
+    browser_kind = nil
+  elseif key == "return" or key == "enter" then
+    ChooseBrowserItem()
+  elseif key == "up" or key == "down" then
+    browser_cursor = math.max(1, math.min(#browser_results,
+      browser_cursor + (key == "down" and 1 or -1)))
+  elseif key == "pageup" or key == "pagedown" or key == "page up" or key == "page down" then
+    browser_cursor = math.max(1, math.min(#browser_results,
+      browser_cursor + ((key == "pageup" or key == "page up") and -6 or 6)))
+  elseif key == "backspace" then
+    browser_query = browser_query:sub(1, -2)
+    browser_cursor = 1
+    UpdateBrowserResults()
+  elseif #key == 1 and key:match("[%w_%-%.]") and #browser_query < 32 then
+    browser_query = browser_query .. key
+    browser_cursor = 1
+    UpdateBrowserResults()
+  end
+  MarkDirty()
+  return true
+end
+
+-- Sidecar recipes are text, versioned, bounded and tied to one DAT/TAB table.
+-- They NEVER write original TH resources.  The game's Screenshots directory
+-- is the only output location; an unconfigured path fails visibly.
+local RECIPE_VERSION = "SVR1"
+local function RecipePath()
+  local root = TheApp.screenshot_dir
+  if type(root) ~= "string" or root == "" then
+    return nil, "No Screenshots directory configured"
+  end
+  local path = sprite_table_paths[sprite_table_index]
+  local sep = root:match("[/\\]$") and "" or package.config:sub(1, 1)
+  return root .. sep .. ("SpriteViewer_%s_%s.svr"):format(
+    path[1]:gsub("[^%w]", ""), path[2]:gsub("[^%w]", ""))
+end
+
+local function DisplayFilename(path)
+  return path:match("([^/\\]+)$") or path
+end
+
+local function SerializeRecipe()
+  local path = sprite_table_paths[sprite_table_index]
+  local lines = {table.concat({RECIPE_VERSION, path[1], path[2],
+    is_complex and "complex" or "simple", assembly_mode}, "\t")}
+  for _, item in ipairs(selected) do
+    lines[#lines + 1] = string.format("%d\t%d\t%d\t%d",
+      item.id, item.dx, item.dy, item.repeat_count)
+  end
+  return table.concat(lines, "\n") .. "\n"
+end
+
+local function SaveRecipe()
+  local path, err = RecipePath()
+  if not path then notice = err; MarkDirty(); return end
+  local value = SerializeRecipe()
+  local prev = io.open(path, "rb")
+  local previous
+  if prev then previous = prev:read("*a"); prev:close() end
+  if previous == value then
+    notice = "Already saved: " .. DisplayFilename(path)
+    recipe_overwrite_confirm = false
+    MarkDirty()
+    return
+  end
+  if previous and not recipe_overwrite_confirm then
+    recipe_overwrite_confirm = true
+    notice = "File exists. Ctrl+S again to replace your saved recipe."
+    MarkDirty()
+    return
+  end
+  local tmp = path .. ".tmp"
+  local output, why = io.open(tmp, "wb")
+  if not output then
+    notice = "Save failed: " .. tostring(why)
+    MarkDirty()
+    return
+  end
+  local ok, write_err = output:write(value)
+  local close_ok, close_err = output:close()
+  if not ok or not close_ok then
+    os.remove(tmp)
+    notice = "Save failed: " .. tostring(write_err or close_err)
+  else
+    -- On Windows os.rename cannot replace an existing file. Back up the old
+    -- sidecar first, then promote the fully written temporary file. Do not
+    -- overwrite a previous backup, and attempt rollback if promotion fails.
+    local backup
+    if previous then
+      for i = 1, 99 do
+        local candidate = path .. ".bak" .. i
+        local check = io.open(candidate, "rb")
+        if check then check:close() else backup = candidate; break end
+      end
+    end
+    if previous and not backup then
+      os.remove(tmp)
+      notice = "Save failed: too many existing recipe backups"
+    else
+      local backup_ok, backup_err = true, nil
+      if backup then backup_ok, backup_err = os.rename(path, backup) end
+      if not backup_ok then
+        os.remove(tmp)
+        notice = "Save failed: " .. tostring(backup_err)
+      else
+        local replaced, rename_err = os.rename(tmp, path)
+        if not replaced then
+          os.remove(tmp)
+          local restored = not backup or os.rename(backup, path)
+          notice = "Save failed: " .. tostring(rename_err) ..
+            (restored and "" or " (previous file retained as backup)")
+        else
+          notice = "Saved: " .. DisplayFilename(path)
+          recipe_overwrite_confirm = false
+        end
+      end
+    end
+  end
+  MarkDirty()
+end
+
+local function ParseRecipe(blob)
+  if #blob > 32768 then return nil, "Recipe exceeds 32 KiB" end
+  local lines = {}
+  for line in blob:gmatch("([^\r\n]+)") do lines[#lines + 1] = line end
+  if #lines == 0 or #lines > 4097 then return nil, "Invalid recipe length" end
+  local ver, dir, name, format, mode = lines[1]:match(
+    "^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
+  local path = sprite_table_paths[sprite_table_index]
+  if ver ~= RECIPE_VERSION then return nil, "Unsupported recipe version" end
+  if dir ~= path[1] or name ~= path[2] then
+    return nil, "Recipe belongs to another sprite table"
+  end
+  if format ~= (is_complex and "complex" or "simple") then
+    return nil, "Recipe expects a different decoding mode"
+  end
+  if mode ~= "layers" and mode ~= "strip" then
+    return nil, "Invalid assembly mode"
+  end
+  local parsed, lookup = {}, {}
+  for i = 2, #lines do
+    local id, dx, dy, copies = lines[i]:match(
+      "^(%-?%d+)\t(%-?%d+)\t(%-?%d+)\t(%d+)$")
+    id, dx, dy, copies = tonumber(id), tonumber(dx), tonumber(dy), tonumber(copies)
+    if not id or id < 0 or id >= #sprite_table or
+        not dx or math.abs(dx) > 4096 or not dy or math.abs(dy) > 4096 or
+        not copies or copies < 1 or copies > 99 or lookup[id] then
+      return nil, "Invalid entry at line " .. i
+    end
+    lookup[id] = true
+    parsed[#parsed + 1] = {id = id, dx = dx, dy = dy, repeat_count = copies}
+  end
+  return {items = parsed, lookup = lookup, mode = mode}
+end
+
+local function LoadRecipe()
+  local path, err = RecipePath()
+  if not path then notice = err; MarkDirty(); return end
+  local fh, why = io.open(path, "rb")
+  if not fh then notice = "Load failed: " .. tostring(why); MarkDirty(); return end
+  local blob = fh:read(32769) or ""
+  fh:close()
+  local parsed, parse_error = ParseRecipe(blob)
+  if not parsed then
+    notice = "Recipe not loaded: " .. parse_error
+    MarkDirty()
+    return
+  end
+  selected, selected_lookup = parsed.items, parsed.lookup
+  assembly_mode = parsed.mode
+  animation_index = 1
+  assembly_pan_x = 0
+  if #selected > 0 then focus_id = selected[1].id end
+  notice = string.format("Loaded %d components: %s", #selected, DisplayFilename(path))
+  recipe_overwrite_confirm = false
+  MarkDirty()
+end
+
+local function OpenView(mode)
+  if mode == "animation" then
+    if view_mode ~= "animation" then OpenAnimation() end
+  elseif mode == "inspector" then
+    if view_mode ~= "inspector" then inspector_return_view = view_mode end
+    view_mode = "inspector"
+  else
+    if view_mode == "animation" then ResetAnimation() end
+    view_mode = mode
+    if mode == "assembly" and #selected > 0 and not IndexOf(focus_id) then
+      focus_id = selected[1].id
+    end
+  end
+  MarkDirty()
+end
+
+local function DoKey(_, rawchar, modifiers)
   local key = rawchar:lower()
+  modifiers = modifiers or {}
+  if key == "f1" or key == "?" then
+    help_open = not help_open
+    MarkDirty()
+    return true
+  end
+  if help_open then
+    if key == "escape" then help_open = false; MarkDirty() end
+    return true
+  end
+  if browser_kind then return HandleBrowserKey(key) end
+  if key == "x" then
+    screenshot_requested = true
+    notice = nil
+    MarkDirty()
+    return true
+  end
+  if modifiers.ctrl and key == "s" then
+    SaveRecipe()
+    return true
+  end
+  if modifiers.ctrl and key == "o" then
+    LoadRecipe()
+    return true
+  end
+  if modifiers.ctrl and key == "a" then
+    BulkSelect(false)
+    return true
+  end
+  if modifiers.ctrl and key == "i" then
+    BulkSelect(true)
+    return true
+  end
+  if jump_mode then
+    if key == "return" or key == "enter" then
+      local value = tonumber(jump_text)
+      if value then
+        if jump_mode == "sprite" then
+          view_mode = "sheet"
+          ShowSprite(math.floor(value))
+        else
+          local item = selected[IndexOf(focus_id)]
+          if item then item.repeat_count = math.max(1, math.min(99, math.floor(value))) end
+        end
+      end
+      jump_mode, jump_text = nil, ""
+    elseif key == "escape" then
+      jump_mode, jump_text = nil, ""
+    elseif key == "backspace" then
+      jump_text = jump_text:sub(1, -2)
+    elseif key:match("^%d$") and #jump_text < 5 then
+      jump_text = jump_text .. key
+    end
+    MarkDirty()
+    return true
+  end
+
+  if view_mode == "inspector" then
+    if key == "i" or key == "escape" then
+      OpenView(inspector_return_view)
+      return true
+    elseif modifiers.shift and
+      (key == "left" or key == "right" or key == "up" or key == "down") then
+      if key == "left" then inspector_pan_x = inspector_pan_x + 32 end
+      if key == "right" then inspector_pan_x = inspector_pan_x - 32 end
+      if key == "up" then inspector_pan_y = inspector_pan_y + 32 end
+      if key == "down" then inspector_pan_y = inspector_pan_y - 32 end
+      MarkDirty()
+      return true
+    elseif key == "left" or key == "right" then
+      ShowSprite(focus_id + (key == "right" and 1 or -1))
+      inspector_pan_x, inspector_pan_y = 0, 0
+      return true
+    elseif key == "0" then
+      inspector_pan_x, inspector_pan_y = 0, 0
+      MarkDirty()
+      return true
+    elseif key == "h" then
+      inspector_checkerboard = not inspector_checkerboard
+      MarkDirty()
+      return true
+    elseif key == "-" then
+      inspector_zoom = math.max(1, inspector_zoom - 1)
+      MarkDirty()
+      return true
+    elseif key == "=" or key == "+" then
+      inspector_zoom = math.min(12, inspector_zoom + 1)
+      MarkDirty()
+      return true
+    end
+  end
+
+  -- In preview mode, animation controls are specific and do not alter source.
+  if view_mode == "animation" then
+    if key == "t" or key == "escape" then
+      CloseAnimation()
+      return true
+    elseif key == "space" then
+      ToggleAnimationPlayback()
+      return true
+    elseif key == "left" or key == "right" then
+      animation_playing = false
+      SelectAnimationFrame(animation_index + (key == "right" and 1 or -1))
+      return true
+    elseif key == "j" or key == "k" then
+      animation_playing = false
+      SelectAnimationFrame(animation_index + (key == "k" and 1 or -1))
+      return true
+    elseif key == "[" or key == "left bracket" then
+      animation_fps = math.max(1, animation_fps - 1)
+      animation_last_tick = GetTimeMs()
+      MarkDirty()
+      return true
+    elseif key == "]" or key == "right bracket" then
+      animation_fps = math.min(30, animation_fps + 1)
+      animation_last_tick = GetTimeMs()
+      MarkDirty()
+      return true
+    elseif key == "l" then
+      animation_mode = ({loop = "once", once = "pingpong", pingpong = "loop"})[animation_mode]
+      animation_direction = 1
+      animation_last_tick = GetTimeMs()
+      MarkDirty()
+      return true
+    elseif key == "h" then
+      animation_anchor = ({bottom = "centre", centre = "top", top = "bottom"})[animation_anchor]
+      MarkDirty()
+      return true
+    end
+  end
+
+  -- Preserve the original controls. 'Q' is still handled by DoKeyUp.
   if key == "c" then
+    is_complex = not is_complex
     gfx.cache.tabled = {}
-    LoadTable(sprite_table_index, not is_complex, false)
+    ReLoadSameTable()
   elseif key == "a" then
-    if sprite_table_index > 1 then
-      LoadTable(sprite_table_index - 1, is_complex, true)
-    end
+    if sprite_table_index > 1 then LoadTable(sprite_table_index - 1, nil, true) end
   elseif key == "d" then
-    if sprite_table_index < #sprite_table_paths then
-      LoadTable(sprite_table_index + 1, is_complex, true)
-    end
+    if sprite_table_index < #sprite_table_paths then LoadTable(sprite_table_index + 1, nil, true) end
   elseif key == "p" then
-    palette_index = (palette_index or 1) % #palettes + 1
+    if modifiers.shift then
+      OpenBrowser("palette")
+    else
+      palette_index = palette_index % #palettes + 1
+      gfx.cache.tabled = {}
+      ReLoadSameTable()
+    end
+  elseif key == "f" then
+    palette_index = closest_matching_palette(sprite_table_paths[sprite_table_index][2]) or mpalette_index or 1
     gfx.cache.tabled = {}
-    LoadTable(sprite_table_index, is_complex, false)
+    ReLoadSameTable()
   elseif key == "w" then
     wdown = true
-    need_draw = true
   elseif key == "s" then
     sdown = true
-    need_draw = true
   elseif key == "-" then
-    if scale > 1 then
-      scale = scale - 1
-      need_draw = true
+    if view_mode == "animation" then
+      animation_zoom = math.max(1, animation_zoom - 1)
+    else
+      scale = math.max(1, scale - 1)
     end
-  elseif key == "=" then
-    if scale < 8 then
-      scale = scale + 1
-      need_draw = true
+    MarkDirty()
+  elseif key == "=" or key == "+" then
+    if view_mode == "animation" then
+      animation_zoom = math.min(8, animation_zoom + 1)
+    else
+      scale = math.min(8, scale + 1)
     end
+    MarkDirty()
   elseif key == "b" then
     bg_colour_index = bg_colour_index % #background_colours + 1
-    need_draw = true
+    MarkDirty()
+  elseif key == "v" then
+    if view_mode == "animation" then
+      CloseAnimation()
+    else
+      view_mode = view_mode == "sheet" and "assembly" or "sheet"
+      if view_mode == "assembly" and #selected > 0 and
+          not IndexOf(focus_id) then
+        focus_id = selected[1].id
+      end
+    end
+    MarkDirty()
+  elseif key == "t" then
+    OpenAnimation()
+  elseif key == "i" then
+    OpenView("inspector")
+  elseif key == "u" then
+    ClearSelection()
+  elseif key == "m" then
+    assembly_mode = assembly_mode == "strip" and "layers" or "strip"
+    assembly_pan_x = 0
+    MarkDirty()
+  elseif key == "space" then
+    if view_mode == "sheet" and modifiers.shift then
+      SelectRange(selection_anchor, focus_id)
+    else
+      ToggleSelection(focus_id)
+    end
+  elseif key == "home" and view_mode == "sheet" then
+    y_off = 0
+    MarkDirty()
+  elseif key == "end" and view_mode == "sheet" then
+    y_off = -100000000 -- clamped by ClampScroll on render
+    MarkDirty()
+  elseif (key == "pageup" or key == "page up" or
+          key == "pagedown" or key == "page down") and view_mode == "sheet" then
+    local _, sh = GetViewerSize(TheApp.video)
+    local direction = (key == "pageup" or key == "page up") and 1 or -1
+    y_off = y_off + direction * math.max(32, sh - header_height - 24)
+    MarkDirty()
+  elseif key == "j" or key == "k" then
+    local direction = key == "j" and -1 or 1
+    if view_mode == "assembly" then
+      FocusSelected(direction)
+    else
+      local anchor = selection_anchor or focus_id
+      ShowSprite(focus_id + direction)
+      if modifiers.shift then SelectRange(anchor, focus_id) end
+    end
+  elseif key == "/" or key == "slash" then
+    OpenBrowser("table")
+  elseif key == "g" then
+    jump_mode, jump_text = "sprite", ""
+    MarkDirty()
+  elseif key == "n" then
+    if #selected > 0 then jump_mode, jump_text = "copies", ""; MarkDirty() end
+  elseif key == "comma" or key == "," or key == "period" or key == "." then
+    local from = IndexOf(focus_id)
+    if from then
+      local to = from + ((key == "comma" or key == ",") and -1 or 1)
+      if selected[to] then
+        selected[from], selected[to] = selected[to], selected[from]
+        MarkDirty()
+      end
+    end
+  elseif key == "left" or key == "right" or key == "up" or key == "down" then
+    if view_mode == "assembly" and assembly_mode == "strip" then
+      -- Native-size composites can exceed the window. Pan the viewport,
+      -- never the source offsets, rather than hiding inaccessible components.
+      if key == "left" then
+        assembly_pan_x = math.min(0, assembly_pan_x + 32)
+      elseif key == "right" then
+        assembly_pan_x = math.max(assembly_min_pan_x, assembly_pan_x - 32)
+      end
+      MarkDirty()
+    else
+      local item = selected[IndexOf(focus_id)]
+      if item and view_mode == "assembly" and assembly_mode == "layers" then
+        if key == "left" then item.dx = item.dx - 1 end
+        if key == "right" then item.dx = item.dx + 1 end
+        if key == "up" then item.dy = item.dy - 1 end
+        if key == "down" then item.dy = item.dy + 1 end
+        MarkDirty()
+      end
+    end
+  elseif key == "r" then
+    local item = selected[IndexOf(focus_id)]
+    if item then item.dx, item.dy, item.repeat_count = 0, 0, 1 end
+    MarkDirty()
   end
   return need_draw
 end
 
 local function DoKeyUp(_, rawchar)
-    local key = rawchar:lower()
-    if key == "q" then -- Exit sprite viewer
-      TheApp.eventHandlers = old_event_handlers
-      sprite_viewer_gfx_cache = gfx.cache.tabled
-      gfx.cache.tabled = old_gfx_cache
-      is_open = false
-      return
-    end
-    if key == "w" then
-        wdown = false
-    end
-    if key == "s" then
-        sdown = false
-    end
+  local key = rawchar:lower()
+  if key == "q" then
+    TheApp.eventHandlers = old_event_handlers
+    sprite_viewer_gfx_cache = gfx.cache.tabled
+    gfx.cache.tabled = old_gfx_cache
+    is_open = false
+    return
+  elseif key == "w" then wdown = false
+  elseif key == "s" then sdown = false end
 end
 
-local function DoTextInput()
+local function DoTextInput() return false end
+
+local function DoMouseDown(_, button, x, y)
+  if help_open then
+    if button == 1 then help_open = false; MarkDirty() end
+    return true
+  end
+  if browser_kind then
+    if button == 1 then
+      for _, hit in ipairs(browser_hit_boxes) do
+        if x >= hit.x and x < hit.x + hit.w and
+            y >= hit.y and y < hit.y + hit.h then
+          browser_cursor = hit.index
+          ChooseBrowserItem()
+          return true
+        end
+      end
+    end
+    return true
+  end
+  if button == 1 then
+    for _, tab in ipairs(header_hit_boxes) do
+      if x >= tab.x and x < tab.x + tab.w and
+          y >= tab.y and y < tab.y + tab.h then
+        OpenView(tab.mode)
+        return true
+      end
+    end
+  end
+  if view_mode == "inspector" then return false end
+  if view_mode == "assembly" then
+    if button ~= 1 then return false end
+    for _, c in ipairs(assembly_hit_boxes) do
+      if x >= c.x and x < c.x + c.w and y >= c.y and y < c.y + c.h then
+        focus_id = c.id
+        MarkDirty()
+        return true
+      end
+    end
+    return false
+  end
+  if view_mode == "animation" then
+    if button ~= 1 then return false end
+    for _, c in ipairs(animation_hit_boxes) do
+      if x >= c.x and x < c.x + c.w and y >= c.y and y < c.y + c.h then
+        animation_playing = false
+        SelectAnimationFrame(c.index)
+        return true
+      end
+    end
+    return false
+  end
+  if view_mode ~= "sheet" or y < header_height then return false end
+  if button ~= 1 and button ~= 3 then return false end
+  for _, c in ipairs(hit_boxes) do
+    if x >= c.x and x < c.x + c.w and y >= c.y and y < c.y + c.h then
+      -- Mouse button events have no modifier argument. CorsixTH exposes the
+      -- actual SDL keyboard modifiers; this also handles Shift held before
+      -- opening the viewer. Right-click retains its original checkbox action.
+      local mods = (SDL and SDL.getKeyModifiers and SDL.getKeyModifiers()) or {}
+      if mods.shift then
+        SelectRange(selection_anchor or c.id, c.id)
+      elseif button == 3 or (mods.ctrl and button == 1) or x < c.x + 13 then
+        ToggleSelection(c.id)
+      else
+        focus_id = c.id
+        selection_anchor = c.id
+        MarkDirty()
+      end
+      return true
+    end
+  end
   return false
 end
 
-local function Render(canvas)
-  local encoding = is_complex and " (Complex) " or " (Simple) "
-  local msg = table.concat(sprite_table_paths[sprite_table_index], package.config:sub(1, 1)) .. encoding .. palette_name
-  local _, fonth = font:sizeOf(msg)
-  local sep = 2
-  local y = y_off
-  font:draw(canvas, "CorsixTH Debug Sprite Viewer", 0, y)
-  y = y + (fonth + sep)
-  font:draw(canvas, "W/A/S/D to navigate, C to change mode, P to switch palette, -/= to scale, B to change background, Q to quit", 0, y)
-  y = y + (fonth + sep)
-  font:draw(canvas, msg, 0, y)
-  y = y + fonth + sep
-  local x = 0
-  local sw, sh = canvas:getRenderSize()
-  local tallest = 0
-  for i = 0, #sprite_table - 1 do
-    local w, h = sprite_table:size(i)
-    w = w * scale
-    h = h * scale
-    local lbl = "#" .. i .. " (" .. w .. "x" .. h .. ")"
-    local lw = font:sizeOf(lbl)
-    if lw > w then w = lw end
-    h = h + fonth + sep
-    if x + w > sw then
-      x = 0
-      y = y + tallest
-      if y > sh then
-        break
+local function DoMouseWheel(_, x, y)
+  if browser_kind and y ~= 0 then
+    browser_cursor = math.max(1, math.min(#browser_results,
+      browser_cursor - math.floor(y)))
+    MarkDirty()
+    return true
+  end
+  if view_mode == "sheet" and y ~= 0 then
+    y_off = y_off + math.floor(y * 54)
+    MarkDirty()
+  end
+  return need_draw
+end
+
+-- The viewer's only persistent chrome: compact mode selectors.  The contact
+-- sheet remains full-width and the preview modes do not become docked panels.
+local function DrawViewTabs(canvas, width)
+  header_hit_boxes = {}
+  local tabs = {{"sheet", "SHEET"}, {"inspector", "DETAIL"},
+                {"assembly", "ASSEMBLY"}, {"animation", "FRAMES"}}
+  local tab_width = width < 520 and 65 or 85
+  local x0 = math.max(4, width - tab_width * #tabs - 2)
+  for i, tab in ipairs(tabs) do
+    local x = x0 + (i - 1) * tab_width
+    local active = view_mode == tab[1]
+    local line = canvas:mapRGB(74, 91, 100)
+    local fill = active and canvas:mapRGB(52, 78, 91) or canvas:mapRGB(30, 33, 36)
+    canvas:drawRect(line, x, 1, tab_width - 2, 13)
+    canvas:drawRect(fill, x + 1, 2, tab_width - 4, 11)
+    font:draw(canvas, tab[2], x + 4, 2)
+    header_hit_boxes[#header_hit_boxes + 1] = {
+      mode = tab[1], x = x, y = 1, w = tab_width - 2, h = 13
+    }
+  end
+end
+
+local function DrawNotice(canvas, sw, sh)
+  if not notice then return end
+  -- Keep assembly chips and animation frame IDs visible below the preview.
+  canvas:drawRect(canvas:mapRGB(32, 39, 42), 0, header_height - 15, sw, 15)
+  font:draw(canvas, notice, 4, header_height - 13)
+end
+
+local function RenderHeader(canvas, width)
+  -- Intentionally plain; the sprites are the content, not the UI chrome.
+  canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, width, header_height)
+  local path = sprite_table_paths[sprite_table_index]
+  font:draw(canvas, "Sprite viewer", 2, 1)
+  if width < 600 then
+    font:draw(canvas, "A/D table W/S scroll V assembly T frames", 2, 15)
+    font:draw(canvas, "-/= zoom P palette G jump Q exit", 2, 28)
+    font:draw(canvas, path[2] .. "  checked: " .. #selected, 2, 41)
+  else
+    font:draw(canvas, "A/D tables  / find  W/S scroll  Shift-click range  I detail  V assemble  T frames", 2, 15)
+    font:draw(canvas, "-/= zoom  C format  P palette  Shift+P find palette  G jump  F1 help  Q exit", 2, 28)
+    font:draw(canvas, table.concat(path, "/") .. "  " .. (is_complex and "complex" or "simple") ..
+      "  " .. palette_name .. "  zoom " .. scale .. "x  checked: " .. #selected, 2, 41)
+  end
+  if jump_mode then
+    font:draw(canvas, (jump_mode == "sprite" and "Go to sprite #" or "Repeat count: ") ..
+      jump_text .. "_  [Enter/Esc]", math.max(2, width - 205), 41)
+  end
+end
+
+local function RenderSheet(canvas, sw, sh)
+  hit_boxes = {}
+  local cells = ClampScroll(sw, sh)
+  for _, c in ipairs(cells) do
+    local y = c.y + y_off
+    if y >= header_height and y < sh and y + c.h > header_height then
+      local checked = selected_lookup[c.id] == true
+      -- Checkbox at left of each label, separate from sprite focus.
+      local fg = canvas:mapRGB(160, 160, 160)
+      local accent = canvas:mapRGB(220, 220, 220)
+      canvas:drawRect(fg, c.x + 1, y + 1, 10, 10)
+      canvas:drawRect(canvas:mapRGB(24, 24, 24), c.x + 2, y + 2, 8, 8)
+      if checked then
+        canvas:drawRect(accent, c.x + 4, y + 4, 4, 4)
+      end
+      local w, h = sprite_table:size(c.id)
+      local marker = c.id == focus_id and ">" or " "
+      font:draw(canvas, marker .. "#" .. c.id .. " " .. w .. "x" .. h, c.x + 12, y)
+      sprite_table:draw(canvas, c.id, c.x, y + c.label_h + 4, {scaleFactor = scale})
+      hit_boxes[#hit_boxes + 1] = {id = c.id, x = c.x, y = y, w = c.w, h = c.h}
+    end
+  end
+  RenderHeader(canvas, sw)
+end
+
+local function AssemblyBounds()
+  -- A layer may have negative offsets. Include it in the preview instead of
+  -- silently clipping the part that crosses the origin.
+  local min_x, min_y, max_x, max_y = 0, 0, 0, 0
+  for _, item in ipairs(selected) do
+    local w, h = sprite_table:size(item.id)
+    if assembly_mode == "strip" then
+      max_x = max_x + w * item.repeat_count
+      max_y = math.max(max_y, h)
+    else
+      min_x = math.min(min_x, item.dx)
+      min_y = math.min(min_y, item.dy)
+      max_x = math.max(max_x, item.dx + w)
+      max_y = math.max(max_y, item.dy + h)
+    end
+  end
+  return min_x, min_y, max_x, max_y
+end
+
+local function RenderAssembly(canvas, sw, sh)
+  assembly_hit_boxes = {}
+  canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
+  if sw < 600 then
+    font:draw(canvas, "Assembly V: gallery M: strip/layers", 2, 2)
+    font:draw(canvas, "Click component / J,K focus  ,/. reorder", 2, 16)
+    font:draw(canvas, "N: repeat  arrows: pan / nudge  R: reset", 2, 30)
+  else
+    font:draw(canvas, "Sprite assembly", 2, 2)
+    font:draw(canvas, "Click component or J/K: focus    ,/.: reorder    N: repeat count", 2, 16)
+    font:draw(canvas, "Arrows pan/nudge   Ctrl+S save   Ctrl+O load   X screenshot   F1 help", 2, 30)
+  end
+  if #selected == 0 then
+    font:draw(canvas, "No sprites checked. Press V, tick some sprites, then return.", 8, 78)
+    return
+  end
+  local min_x, min_y, max_x, max_y = AssemblyBounds()
+  local composite_w = math.max(1, max_x - min_x)
+  local composite_h = math.max(1, max_y - min_y)
+  -- Reserve a stable footer for the selectable component list and focus data.
+  local max_w, max_h = sw, math.max(1, sh - header_height - 100)
+  local fit = math.max(1, math.min(scale, math.floor(max_w / composite_w), math.floor(max_h / composite_h)))
+  if assembly_mode == "strip" then
+    assembly_min_pan_x = math.min(0, sw - composite_w * fit)
+    assembly_pan_x = math.min(0, math.max(assembly_min_pan_x, assembly_pan_x))
+  else
+    assembly_pan_x, assembly_min_pan_x = 0, 0
+  end
+  local start_x = math.max(0, math.floor((sw - composite_w * fit) / 2)) + assembly_pan_x
+  local start_y = header_height + math.max(10,
+    math.floor((max_h - composite_h * fit) / 2))
+  local cursor = 0
+  for _, item in ipairs(selected) do
+    local w, h = sprite_table:size(item.id)
+    if assembly_mode == "strip" then
+      for _ = 1, item.repeat_count do
+        sprite_table:draw(canvas, item.id, start_x + cursor * fit,
+          start_y + (composite_h - h) * fit, {scaleFactor = fit})
+        cursor = cursor + w
+      end
+    else
+      sprite_table:draw(canvas, item.id, start_x + (item.dx - min_x) * fit,
+        start_y + (item.dy - min_y) * fit, {scaleFactor = fit})
+    end
+  end
+  -- A long checked set must never become a clipped single line. Keep a
+  -- short, clickable window of component IDs near the focused component.
+  local desc = assembly_mode .. "  " .. composite_w .. "x" .. composite_h ..
+    "  display " .. fit .. "x  checked " .. #selected
+  if assembly_min_pan_x < 0 then
+    desc = desc .. "  pan " .. -assembly_pan_x .. "/" .. -assembly_min_pan_x
+  end
+  font:draw(canvas, desc, 8, sh - 75)
+  local active_idx = IndexOf(focus_id) or 1
+  local active = selected[active_idx]
+  local details = "Focus #" .. active.id .. "  item " .. active_idx .. "/" .. #selected
+  if assembly_mode == "strip" then
+    details = details .. "  copies " .. active.repeat_count
+  else
+    details = details .. "  offset (" .. active.dx .. "," .. active.dy .. ")"
+  end
+  font:draw(canvas, details, 8, sh - 59)
+  assembly_hit_boxes = {}
+  local cell_w = sw < 520 and 56 or 70
+  local visible = math.max(1, math.floor((sw - 16) / cell_w))
+  local first = math.max(1, math.min(active_idx - math.floor(visible / 2),
+                                    #selected - visible + 1))
+  local last = math.min(#selected, first + visible - 1)
+  local grey = canvas:mapRGB(115, 115, 115)
+  local ink = canvas:mapRGB(220, 220, 220)
+  local dark = canvas:mapRGB(18, 18, 18)
+  local row_y = sh - 34
+  for i = first, last do
+    local item = selected[i]
+    local x = 8 + (i - first) * cell_w
+    canvas:drawRect(i == active_idx and ink or grey, x, row_y, cell_w - 3, 23)
+    canvas:drawRect(dark, x + 1, row_y + 1, cell_w - 5, 21)
+    local label = "#" .. item.id ..
+      (item.repeat_count > 1 and "x" .. item.repeat_count or "")
+    font:draw(canvas, label, x + 4, row_y + 5)
+    assembly_hit_boxes[#assembly_hit_boxes + 1] =
+      {id = item.id, x = x, y = row_y, w = cell_w - 3, h = 23}
+  end
+  if first > 1 then
+    font:draw(canvas, "<", 0, row_y + 6)
+    assembly_hit_boxes[#assembly_hit_boxes + 1] =
+      {id = selected[math.max(1, first - visible)].id,
+       x = 0, y = row_y, w = 8, h = 23}
+  end
+  if last < #selected then
+    font:draw(canvas, ">", sw - 10, row_y + 6)
+    assembly_hit_boxes[#assembly_hit_boxes + 1] =
+      {id = selected[math.min(#selected, last + visible)].id,
+       x = sw - 12, y = row_y, w = 12, h = 23}
+  end
+  if jump_mode then
+    font:draw(canvas, "Repeat count: " .. jump_text .. "_  [Enter/Esc]", 8, sh - 95)
+  end
+end
+
+-- No timeline is shown in the contact sheet. This frame strip appears only
+-- when explicitly requested, following XCC Mixer's separate SHP video viewer.
+local function RenderAnimation(canvas, sw, sh)
+  animation_hit_boxes = {}
+  local ink = canvas:mapRGB(220, 220, 220)
+  local grey = canvas:mapRGB(105, 105, 105)
+  canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
+  local path = sprite_table_paths[sprite_table_index]
+  if sw < 600 then
+    font:draw(canvas, "Preview  T: back  Space: play", 2, 2)
+    font:draw(canvas, "Arrows: step  [/]: FPS  L: loop", 2, 16)
+    font:draw(canvas, "- /=: zoom  H: align  " .. path[2], 2, 30)
+  else
+    font:draw(canvas, "Frame preview", 2, 2)
+    font:draw(canvas, "[/]: FPS  -/=: zoom  L: loop/once/pingpong  H: align  Q: exit", 2, 16)
+    font:draw(canvas, table.concat(path, "/") .. "  " .. palette_name ..
+      "  (user-chosen sequence; timing is not stored in DAT/TAB)", 2, 30)
+  end
+  if #selected == 0 then
+    font:draw(canvas, "No frames checked. Press T, tick sprites in the gallery, then press T.", 8, 86)
+    return
+  end
+
+  animation_index = math.min(animation_index, #selected)
+  local max_w, max_h = 1, 1
+  for _, item in ipairs(selected) do
+    local w, h = sprite_table:size(item.id)
+    max_w, max_h = math.max(max_w, w), math.max(max_h, h)
+  end
+  local strip_top = sh - 50
+  local preview_top = header_height + 12
+  local space_h = math.max(1, strip_top - preview_top - 26)
+  local fit = math.max(1, math.min(animation_zoom,
+    math.floor((sw - 24) / max_w), math.floor(space_h / max_h)))
+  local start_x = math.max(0, math.floor((sw - max_w * fit) / 2))
+  local start_y = preview_top + math.max(0, math.floor((space_h - max_h * fit) / 2))
+  local active = selected[animation_index]
+  local w, h = sprite_table:size(active.id)
+  local align_y = 0
+  if animation_anchor == "bottom" then
+    align_y = (max_h - h) * fit
+  elseif animation_anchor == "centre" then
+    align_y = math.floor((max_h - h) * fit / 2)
+  end
+  -- Never reconstruct or blend neighbouring frames. Use the original sprite
+  -- drawing API, preserving its transparency and selected palette.
+  sprite_table:draw(canvas, active.id, start_x, start_y + align_y,
+    {scaleFactor = fit})
+
+  local status = animation_playing and "Playing" or "Paused"
+  local status_format = sw < 600 and "%s %d/%d #%d %dFPS %s" or
+    "%s   %d/%d   sprite #%d   %dx%d   %d FPS   %s   %s"
+  if sw < 600 then
+    font:draw(canvas, string.format(status_format, status, animation_index,
+      #selected, active.id, animation_fps, animation_mode), 6, header_height - 13)
+  else
+    font:draw(canvas, string.format(status_format, status, animation_index,
+      #selected, active.id, w, h, animation_fps, animation_mode,
+      animation_anchor), 6, header_height - 13)
+  end
+  if max_w * fit > sw or max_h * fit > space_h then
+    font:draw(canvas, "Large sprite: preview may be clipped", 8, strip_top - 14)
+  end
+
+  -- Filmstrip shows only sprite IDs, not an intrusive second contact sheet.
+  -- The visible range follows the active frame for longer selected sequences.
+  local cell_w = 49
+  local visible = math.max(1, math.floor((sw - 16) / cell_w))
+  local first = math.max(1, math.min(animation_index - math.floor(visible / 2),
+                                    #selected - visible + 1))
+  local last = math.min(#selected, first + visible - 1)
+  local y = sh - 36
+  for i = first, last do
+    local x = 8 + (i - first) * cell_w
+    local active_cell = (i == animation_index)
+    canvas:drawRect(active_cell and ink or grey, x, y, cell_w - 3, 22)
+    canvas:drawRect(canvas:mapRGB(18, 18, 18), x + 1, y + 1, cell_w - 5, 20)
+    font:draw(canvas, "#" .. selected[i].id, x + 3, y + 5)
+    if active_cell then
+      canvas:drawRect(ink, x, y + 22, cell_w - 3, 2)
+    end
+    animation_hit_boxes[#animation_hit_boxes + 1] = {
+      index = i, x = x, y = y, w = cell_w - 3, h = 24
+    }
+  end
+  if first > 1 then font:draw(canvas, "<", 0, y + 5) end
+  if last < #selected then font:draw(canvas, ">", sw - 10, y + 5) end
+end
+
+-- One-sprite detail mode is intentionally not another selection mechanism.
+-- It shows original size, decoding and palette together with a large preview.
+local function RenderInspector(canvas, sw, sh)
+  canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, 0, sw, header_height)
+  local path = sprite_table_paths[sprite_table_index]
+  font:draw(canvas, "Sprite detail", 2, 2)
+  font:draw(canvas, "Arrows: sprite  Shift+arrows: pan  -/=: zoom  H grid  I back", 2, 16)
+  font:draw(canvas, table.concat(path, "/") .. "  " ..
+    (is_complex and "complex" or "simple") .. "  " .. palette_name, 2, 30)
+  local w, h = sprite_table:size(focus_id)
+  local fit = math.max(1, math.min(inspector_zoom,
+    math.floor((sw - 20) / math.max(1, w)),
+    math.floor((sh - header_height - 90) / math.max(1, h))))
+  local x = math.floor((sw - w * fit) / 2) + inspector_pan_x
+  local y = header_height + math.floor((sh - header_height - 66 - h * fit) / 2) + inspector_pan_y
+  if w == 0 or h == 0 then
+    font:draw(canvas, "This entry has no drawable pixels (0 x 0).", 12, math.floor(sh / 2))
+  end
+  if inspector_checkerboard and w > 0 and h > 0 then
+    local square = math.max(6, 8 * fit)
+    local dark = canvas:mapRGB(67, 67, 67)
+    local light = canvas:mapRGB(107, 107, 107)
+    for yy = 0, h * fit - 1, square do
+      for xx = 0, w * fit - 1, square do
+        canvas:drawRect((math.floor(xx/square) + math.floor(yy/square)) % 2 == 0 and dark or light,
+          x + xx, y + yy, math.min(square, w * fit - xx), math.min(square, h * fit - yy))
       end
     end
-    if h > tallest then tallest = h end
-    font:draw(canvas, lbl, x, y)
-    sprite_table:draw(
-        canvas,
-        i,
-        x,
-        y + fonth,
-        { scaleFactor = scale })
-    x = x + w + sep
   end
+  if w > 0 and h > 0 then
+    sprite_table:draw(canvas, focus_id, x, y, {scaleFactor = fit})
+  end
+  local label = string.format("#%d / %d     %d x %d px     %dx     %s",
+    focus_id, #sprite_table - 1, w, h, fit,
+    selected_lookup[focus_id] and "[x] selected" or "[ ] not selected")
+  canvas:drawRect(canvas:mapRGB(28, 32, 35), 0, sh - 47, sw, 47)
+  font:draw(canvas, label, 8, sh - 40)
+  font:draw(canvas, "Actual sprite pixels. No smoothing or reconstruction.", 8, sh - 25)
+end
+
+local function RenderBrowser(canvas, sw, sh)
+  if not browser_kind then return end
+  browser_hit_boxes = {}
+  local height = math.max(84, math.min(220, sh - 70))
+  local width = math.min(440, sw - 12)
+  local left, top = math.floor((sw - width) / 2), math.max(20, math.floor((sh - height) / 3))
+  local edge = canvas:mapRGB(85, 104, 113)
+  canvas:drawRect(edge, left, top, width, height)
+  canvas:drawRect(canvas:mapRGB(25, 28, 31), left + 1, top + 1, width - 2, height - 2)
+  local title = browser_kind == "table" and "Find sprite table" or "Choose palette"
+  font:draw(canvas, title .. "     [Esc to cancel]", left + 8, top + 8)
+  canvas:drawRect(canvas:mapRGB(47, 54, 58), left + 7, top + 24, width - 14, 19)
+  font:draw(canvas, "> " .. browser_query .. "_", left + 12, top + 27)
+  local visible = math.max(1, math.floor((height - 57) / 17))
+  local first = math.max(1, math.min(browser_cursor - math.floor(visible / 2),
+                                     #browser_results - visible + 1))
+  for i = first, math.min(#browser_results, first + visible - 1) do
+    local hit = browser_results[i]
+    local y = top + 49 + (i - first) * 17
+    if i == browser_cursor then
+      canvas:drawRect(canvas:mapRGB(52, 78, 91), left + 6, y - 1, width - 12, 16)
+    end
+    font:draw(canvas, hit.text, left + 12, y + 1)
+    browser_hit_boxes[#browser_hit_boxes + 1] = {
+      index = i, x = left + 6, y = y - 1, w = width - 12, h = 16
+    }
+  end
+  if #browser_results == 0 then
+    font:draw(canvas, "No matches", left + 12, top + 57)
+  end
+  font:draw(canvas, string.format("%d matches  -  arrows / Enter / click",
+    #browser_results), left + 8, top + height - 14)
+end
+
+local function RenderHelp(canvas, sw, sh)
+  if not help_open then return end
+  local w = math.min(495, sw - 16)
+  local h = math.min(306, sh - 40)
+  local x, y = math.floor((sw - w)/2), math.floor((sh - h)/2)
+  canvas:drawRect(canvas:mapRGB(85, 104, 113), x, y, w, h)
+  canvas:drawRect(canvas:mapRGB(25, 28, 31), x + 1, y + 1, w - 2, h - 2)
+  local lines = {
+    "SPRITE VIEWER  /  KEYBOARD REFERENCE",
+    "Browse:   A/D tables   / find table   Shift+P find palette",
+    "          W/S scroll   G jump   -/= zoom   C decode",
+    "          P next palette   F auto palette   B background",
+    "Select:   click focus   tick box or Ctrl+click toggle",
+    "          Shift+click range   Ctrl+A all   Ctrl+I invert",
+    "          U clear   Space toggle   Shift+J/K range",
+    "Detail:   I preview   Left/Right step   H checkerboard",
+    "          Shift+arrows pan large sprites   0 recenter",
+    "Assembly: V toggle   M strip/layers   ,/. reorder",
+    "          arrows pan or nudge   N copies   R reset",
+    "Frames:   T toggle   Space play   Left/Right step",
+    "          [/]: FPS   L loop/once/pingpong   H align",
+    "Files:    Ctrl+S save recipe   Ctrl+O load recipe",
+    "          X screenshot   Q close viewer",
+    "",
+    "Esc / click: close help.  Original game files stay read-only.",
+  }
+  local _, fonth = font:sizeOf("X")
+  local step = math.max(10, math.min(17, math.floor((h - 24) / #lines)))
+  for i, line in ipairs(lines) do
+    if i == 1 then
+      canvas:drawRect(canvas:mapRGB(52, 78, 91), x + 5, y + 5, w - 10, 17)
+    end
+    if y + 9 + (i-1)*step < y + h - 10 then
+      font:draw(canvas, line, x + 9, y + 9 + (i-1)*step)
+    end
+  end
+end
+
+local function Render(canvas)
+  local sw, sh = GetViewerSize(canvas)
+  if view_mode == "sheet" then
+    RenderSheet(canvas, sw, sh)
+  elseif view_mode == "assembly" then
+    RenderAssembly(canvas, sw, sh)
+  elseif view_mode == "animation" then
+    RenderAnimation(canvas, sw, sh)
+  else
+    RenderInspector(canvas, sw, sh)
+  end
+  DrawViewTabs(canvas, sw)
+  DrawNotice(canvas, sw, sh)
+  RenderBrowser(canvas, sw, sh)
+  RenderHelp(canvas, sw, sh)
+end
+
+local function SaveScreenshot(canvas)
+  local root = TheApp.screenshot_dir
+  if type(root) ~= "string" or root == "" then
+    return false, "Screenshots directory is not configured"
+  end
+  local path = sprite_table_paths[sprite_table_index]
+  local sep = root:match("[/\\]$") and "" or package.config:sub(1, 1)
+  local basename = string.format("SpriteViewer_%s_%s_%s",
+    path[1]:gsub("[^%w]", ""), path[2]:gsub("[^%w]", ""),
+    os.date("%Y%m%d-%H%M%S"))
+  for i = 0, 999 do
+    local filename = root .. sep .. basename .. "_" .. i .. ".png"
+    local handle = io.open(filename, "rb")
+    if handle then
+      handle:close()
+    else
+      local ok, result, err = pcall(canvas.takeScreenshot, canvas, filename)
+      if not ok then return false, tostring(result) end
+      if not result then return false, tostring(err or "Screenshot failed") end
+      return true, filename
+    end
+  end
+  return false, "No available screenshot filename"
 end
 
 local function DoFrame(app)
@@ -240,39 +1482,90 @@ local function DoFrame(app)
     Render(canvas)
   end
   canvas:endFrame()
+  if screenshot_requested then
+    screenshot_requested = false
+    local ok, message = SaveScreenshot(canvas)
+    notice = ok and ("Screenshot: " .. DisplayFilename(message)) or
+      ("Screenshot failed: " .. message)
+    MarkDirty()
+  end
 end
 
 local function DoTimer()
-  if wdown then
-    y_off = y_off + 32
-    need_draw = true
+  if view_mode == "animation" and animation_playing then
+    local now = GetTimeMs()
+    local interval = 1000 / animation_fps
+    if animation_last_tick == nil then animation_last_tick = now end
+    local elapsed = now - animation_last_tick
+    if elapsed < 0 then
+      -- SDL tick counter wrapped; start timing again.
+      animation_last_tick = now
+    elseif elapsed >= interval then
+      -- Catch up when a timer event is delayed, but don't freeze after long
+      -- pauses or window focus changes.  No frame blending/interpolation.
+      local advances = math.min(8, math.floor(elapsed / interval))
+      for _ = 1, advances do
+        if not animation_playing then break end
+        AdvanceAnimationFrame()
+      end
+      if advances == 8 then
+        animation_last_tick = now
+      else
+        animation_last_tick = animation_last_tick + advances * interval
+      end
+      MarkDirty()
+    end
   end
-  if sdown then
-    y_off = y_off - 32
-    need_draw = true
+  if view_mode == "sheet" then
+    if wdown then y_off = y_off + 32; MarkDirty() end
+    if sdown then y_off = y_off - 32; MarkDirty() end
   end
   return need_draw
 end
 
+-- The native SDL dispatcher sends these events even while the debug viewer
+-- owns the input handlers. Do not forward them to the game underneath.
+-- A resize invalidates the cached contact-sheet positions.
+local function DoWindowResize()
+  sheet_layout_cache = nil
+  MarkDirty()
+  return true
+end
+
+local function DoActive()
+  MarkDirty()
+  return false
+end
+
+local function IgnoreViewerEvent()
+  return false
+end
+
 local function open()
-  if is_open then
-    return
-  end
+  if is_open then return end
   is_open = true
+  ResetAnimation()
+  view_mode = "sheet"
   old_gfx_cache = gfx.cache.tabled
   gfx.cache.tabled = sprite_viewer_gfx_cache
   font = gfx:loadFontAndSpriteTable("QData", "Font00V")
-
   old_event_handlers = TheApp.eventHandlers
   TheApp.eventHandlers = {
     frame = DoFrame,
     keydown = DoKey,
     keyup = DoKeyUp,
     timer = DoTimer,
-    textinput = DoTextInput
+    textinput = DoTextInput,
+    buttondown = DoMouseDown,
+    buttonup = IgnoreViewerEvent,
+    motion = IgnoreViewerEvent,
+    active = DoActive,
+    window_resize = DoWindowResize,
+    window_pixel_size_changed = DoWindowResize,
+    window_display_scale_changed = DoWindowResize,
+    mousewheel = DoMouseWheel,
   }
-
-  need_draw = true
+  MarkDirty()
 end
 
 return open
