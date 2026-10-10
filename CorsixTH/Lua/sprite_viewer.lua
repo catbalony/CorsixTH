@@ -972,6 +972,16 @@ local function DoMouseWheel(_, x, y)
   if view_mode == "sheet" and y ~= 0 then
     y_off = y_off + math.floor(y * 54)
     MarkDirty()
+    return true
+  end
+  if view_mode == "assembly" and y ~= 0 and #selected > 0 then
+    -- Wheel over the assembly is a focus navigator, matching J/K. The
+    -- preview and stable component page reveal the focused item together.
+    -- Bound large hardware-wheel deltas to avoid an accidental long sweep.
+    local steps = math.min(8, math.max(1, math.floor(math.abs(y))))
+    local direction = y > 0 and -1 or 1
+    for _ = 1, steps do FocusSelected(direction) end
+    return true
   end
   return need_draw
 end
@@ -1101,14 +1111,14 @@ local function RenderAssembly(canvas, sw, sh)
     font:draw(canvas, "Sprite assembly", 2, 2)
     DrawFittedText(canvas, assembly_mode .. "  " .. #selected ..
       " parts   focus #" .. focus_id, 2, 29, sw - 4)
-    DrawFittedText(canvas, "J/K focus  PgUp/Dn page  F1 help", 2, 42, sw - 4)
+    DrawFittedText(canvas, "J/K or wheel focus  PgUp/Dn page  F1", 2, 42, sw - 4)
   elseif sw < 600 then
     font:draw(canvas, "Sprite assembly", 2, 2)
-    DrawFittedText(canvas, "Click item  J/K focus  M mode  F1 help", 2, 16, sw - 4)
+    DrawFittedText(canvas, "Click item  J/K/wheel focus  M mode  F1", 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery", 2, 30, sw - 4)
   else
     font:draw(canvas, "Sprite assembly", 2, 2)
-    DrawFittedText(canvas, "Click chips/overview  J/K focus  PgUp/Dn pages  M mode  F1", 2, 16, sw - 4)
+    DrawFittedText(canvas, "Click overview  J/K/wheel focus  PgUp/Dn pages  M mode  F1", 2, 16, sw - 4)
     DrawFittedText(canvas, "Ctrl+S save  Ctrl+O load  V gallery  X capture", 2, 30, sw - 4)
   end
   if #selected == 0 then
