@@ -108,3 +108,16 @@ sprite API offers no opacity mask. Keep footer/header/action hit regions ahead
 of preview hits. See `docs/ASSEMBLY_PREVIEW_PICKING.md`. Run the real AppImage
 with `--assembly-pick-check` to verify native focus-marker pixels. Do not
 commit game screenshots. GitHub Actions remains manual-only.
+
+## Finite finish line: v17 → v19 (owner requested 2026-10-11)
+
+See `docs/RELEASE_ROADMAP.md`. **Three rounds from v16: v17 layer drag, v18
+feature-freeze/stabilization, v19 final acceptance/release handoff. STOP after
+v19 unless a release-blocker needs a fix.** This instruction takes priority
+over suggestions to keep inventing features. No automatic Actions; no merges to
+master; leave the separate Tarantino art branch alone.
+
+v17: `sprite_viewer_drag.lua` computes source-pixel deltas and Ctrl 8px snap.
+One mouse release → one History transaction; Esc/view switch/resize cancel.
+Native acceptance: `scripts/native-smoke.py --assembly-drag-check` verifies
+an actual Ctrl-drag, Undo backup, and final `(16,8)` recipe offset.
