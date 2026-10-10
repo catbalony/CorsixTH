@@ -29,6 +29,8 @@ SOFTWARE.
 local is_open = false
 local gfx = TheApp.gfx
 local SDL = rawget(_G, "SDL") or require("sdl")
+local Recipe = require("sprite_viewer_recipe")
+local Browser = require("sprite_viewer_browser")
 local font -- Set on open
 local need_draw = true
 local sprite_table_paths = {}
@@ -301,24 +303,7 @@ for i, name in ipairs(palettes) do
   if name == "MPalette.dat" then mpalette_index = i; break end
 end
 
-local function closest_matching_palette(sprite_table_name)
-  local best_score, best_index = 0, nil
-  local lower_st = sprite_table_name:lower()
-  for i, pal_name in ipairs(palettes) do
-    local score = 0
-    local lower_pal = pal_name:lower()
-    for j = 3, math.min(#lower_pal, #lower_st) do
-      if lower_pal:sub(1, j) == lower_st:sub(1, j) then
-        score = j
-      else
-        break
-      end
-    end
-    if score > best_score then best_score, best_index = score, i end
-  end
-  return best_index
-end
-
+-- Palette detection is a pure helper in sprite_viewer_browser.lua.
 -- Game-side callers load the HUD/PullDown/Watch tables in complex mode.
 -- These are verified in CorsixTH's actual game Lua and PANEL04V live rendering.
 -- Keep the manual C toggle for resources whose format is not known.
@@ -339,7 +324,7 @@ local function LoadTable(n, complex, detect_palette)
   if complex == nil then complex = DefaultComplex(path) end
   is_complex = complex
   if detect_palette then
-    palette_index = closest_matching_palette(path[2]) or mpalette_index or 1
+    palette_index = Browser.closest_palette(path[2], palettes) or mpalette_index or 1
   end
   palette_name = palettes[palette_index]
   sprite_table = gfx:loadSpriteTable(path[1], path[2], complex, gfx:getPalette(palette_name))
@@ -439,15 +424,9 @@ end
 -- A single searchable picker handles resource names and palettes. This is a
 -- navigation overlay, not a permanent sidebar; it preserves the contact sheet.
 local function UpdateBrowserResults()
-  browser_results = {}
-  local needle = browser_query:lower()
   local values = browser_kind == "table" and sprite_table_paths or palettes
-  for i, value in ipairs(values) do
-    local label = browser_kind == "table" and table.concat(value, "/") or value
-    if label:lower():find(needle, 1, true) then
-      browser_results[#browser_results + 1] = {index = i, text = label}
-    end
-  end
+  browser_results = Browser.filter(values, browser_query, browser_kind == "table" and
+    function(item) return table.concat(item, "/") end or nil)
   browser_cursor = math.max(1, math.min(browser_cursor, #browser_results))
 end
 
@@ -499,149 +478,32 @@ end
 -- Sidecar recipes are text, versioned, bounded and tied to one DAT/TAB table.
 -- They NEVER write original TH resources.  The game's Screenshots directory
 -- is the only output location; an unconfigured path fails visibly.
-local RECIPE_VERSION = "SVR1"
 local function RecipePath()
-  local root = TheApp.screenshot_dir
-  if type(root) ~= "string" or root == "" then
-    return nil, "No Screenshots directory configured"
-  end
   local path = sprite_table_paths[sprite_table_index]
-  local sep = root:match("[/\\]$") and "" or package.config:sub(1, 1)
-  return root .. sep .. ("SpriteViewer_%s_%s.svr"):format(
-    path[1]:gsub("[^%w]", ""), path[2]:gsub("[^%w]", ""))
+  return Recipe.path(TheApp.screenshot_dir, path[1], path[2])
 end
 
 local function DisplayFilename(path)
   return path:match("([^/\\]+)$") or path
 end
 
-local function SerializeRecipe()
-  local path = sprite_table_paths[sprite_table_index]
-  local lines = {table.concat({RECIPE_VERSION, path[1], path[2],
-    is_complex and "complex" or "simple", assembly_mode}, "\t")}
-  for _, item in ipairs(selected) do
-    lines[#lines + 1] = string.format("%d\t%d\t%d\t%d",
-      item.id, item.dx, item.dy, item.repeat_count)
-  end
-  return table.concat(lines, "\n") .. "\n"
-end
-
 local function SaveRecipe()
   local path, err = RecipePath()
   if not path then notice = err; MarkDirty(); return end
-  local value = SerializeRecipe()
-  local prev = io.open(path, "rb")
-  local previous
-  if prev then previous = prev:read("*a"); prev:close() end
-  if previous == value then
-    notice = "Already saved: " .. DisplayFilename(path)
-    recipe_overwrite_confirm = false
-    MarkDirty()
-    return
-  end
-  if previous and not recipe_overwrite_confirm then
-    recipe_overwrite_confirm = true
-    notice = "File exists. Ctrl+S again to replace your saved recipe."
-    MarkDirty()
-    return
-  end
-  local tmp = path .. ".tmp"
-  local output, why = io.open(tmp, "wb")
-  if not output then
-    notice = "Save failed: " .. tostring(why)
-    MarkDirty()
-    return
-  end
-  local ok, write_err = output:write(value)
-  local close_ok, close_err = output:close()
-  if not ok or not close_ok then
-    os.remove(tmp)
-    notice = "Save failed: " .. tostring(write_err or close_err)
-  else
-    -- On Windows os.rename cannot replace an existing file. Back up the old
-    -- sidecar first, then promote the fully written temporary file. Do not
-    -- overwrite a previous backup, and attempt rollback if promotion fails.
-    local backup
-    if previous then
-      for i = 1, 99 do
-        local candidate = path .. ".bak" .. i
-        local check = io.open(candidate, "rb")
-        if check then check:close() else backup = candidate; break end
-      end
-    end
-    if previous and not backup then
-      os.remove(tmp)
-      notice = "Save failed: too many existing recipe backups"
-    else
-      local backup_ok, backup_err = true, nil
-      if backup then backup_ok, backup_err = os.rename(path, backup) end
-      if not backup_ok then
-        os.remove(tmp)
-        notice = "Save failed: " .. tostring(backup_err)
-      else
-        local replaced, rename_err = os.rename(tmp, path)
-        if not replaced then
-          os.remove(tmp)
-          local restored = not backup or os.rename(backup, path)
-          notice = "Save failed: " .. tostring(rename_err) ..
-            (restored and "" or " (previous file retained as backup)")
-        else
-          notice = "Saved: " .. DisplayFilename(path)
-          recipe_overwrite_confirm = false
-        end
-      end
-    end
-  end
+  local source = sprite_table_paths[sprite_table_index]
+  local blob = Recipe.serialize(source[1], source[2], is_complex, assembly_mode, selected)
+  local ok, message, confirm = Recipe.save(path, blob, recipe_overwrite_confirm)
+  recipe_overwrite_confirm = confirm
+  notice = (ok and (message .. ": " .. DisplayFilename(path)) or message)
   MarkDirty()
-end
-
-local function ParseRecipe(blob)
-  if #blob > 32768 then return nil, "Recipe exceeds 32 KiB" end
-  local lines = {}
-  for line in blob:gmatch("([^\r\n]+)") do lines[#lines + 1] = line end
-  if #lines == 0 or #lines > 4097 then return nil, "Invalid recipe length" end
-  local ver, dir, name, format, mode = lines[1]:match(
-    "^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
-  local path = sprite_table_paths[sprite_table_index]
-  if ver ~= RECIPE_VERSION then return nil, "Unsupported recipe version" end
-  if dir ~= path[1] or name ~= path[2] then
-    return nil, "Recipe belongs to another sprite table"
-  end
-  if format ~= (is_complex and "complex" or "simple") then
-    return nil, "Recipe expects a different decoding mode"
-  end
-  if mode ~= "layers" and mode ~= "strip" then
-    return nil, "Invalid assembly mode"
-  end
-  local parsed, lookup = {}, {}
-  for i = 2, #lines do
-    local id, dx, dy, copies = lines[i]:match(
-      "^(%-?%d+)\t(%-?%d+)\t(%-?%d+)\t(%d+)$")
-    id, dx, dy, copies = tonumber(id), tonumber(dx), tonumber(dy), tonumber(copies)
-    if not id or id < 0 or id >= #sprite_table or
-        not dx or math.abs(dx) > 4096 or not dy or math.abs(dy) > 4096 or
-        not copies or copies < 1 or copies > 99 or lookup[id] then
-      return nil, "Invalid entry at line " .. i
-    end
-    lookup[id] = true
-    parsed[#parsed + 1] = {id = id, dx = dx, dy = dy, repeat_count = copies}
-  end
-  return {items = parsed, lookup = lookup, mode = mode}
 end
 
 local function LoadRecipe()
   local path, err = RecipePath()
   if not path then notice = err; MarkDirty(); return end
-  local fh, why = io.open(path, "rb")
-  if not fh then notice = "Load failed: " .. tostring(why); MarkDirty(); return end
-  local blob = fh:read(32769) or ""
-  fh:close()
-  local parsed, parse_error = ParseRecipe(blob)
-  if not parsed then
-    notice = "Recipe not loaded: " .. parse_error
-    MarkDirty()
-    return
-  end
+  local source = sprite_table_paths[sprite_table_index]
+  local parsed, why = Recipe.load(path, source[1], source[2], is_complex, #sprite_table)
+  if not parsed then notice = why; MarkDirty(); return end
   selected, selected_lookup = parsed.items, parsed.lookup
   assembly_mode = parsed.mode
   animation_index = 1
@@ -819,7 +681,7 @@ local function DoKey(_, rawchar, modifiers)
       ReLoadSameTable()
     end
   elseif key == "f" then
-    palette_index = closest_matching_palette(sprite_table_paths[sprite_table_index][2]) or mpalette_index or 1
+    palette_index = Browser.closest_palette(sprite_table_paths[sprite_table_index][2], palettes) or mpalette_index or 1
     gfx.cache.tabled = {}
     ReLoadSameTable()
   elseif key == "w" then
