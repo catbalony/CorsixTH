@@ -102,6 +102,38 @@ function Layout.assembly_placement(sw, sh, header_height, zoom,
           pan_x = pan, pan_min = pan_min, x = x, y = y}
 end
 
+-- Compact, predictable editing toolbar. The geometry is independent of
+-- SDL, and the action names are implemented by sprite_viewer_assembly.lua.
+-- It deliberately omits copy controls in layers mode: repeat_count affects
+-- only strip assembly, so a layers-only copy button would be misleading.
+function Layout.assembly_controls(screen_width, screen_height, mode)
+  local entries = mode == "strip" and {
+    {"move-left", "Order <"}, {"move-right", "Order >"},
+    {"copy-minus", "Copies -"}, {"copy-plus", "Copies +"},
+    {"reset", "Reset"},
+  } or {
+    {"move-left", "Order <"}, {"move-right", "Order >"},
+    {"dx-minus", "X -"}, {"dx-plus", "X +"},
+    {"dy-minus", "Y -"}, {"dy-plus", "Y +"},
+    {"reset", "Reset"},
+  }
+  local gap = 5
+  local available = math.max(1, screen_width - 16)
+  local button_width = math.max(1,
+    math.min(92, math.floor((available - gap * (#entries - 1)) / #entries)))
+  local total_width = button_width * #entries + gap * (#entries - 1)
+  local x = math.floor((screen_width - total_width) / 2)
+  local result = {}
+  for _, entry in ipairs(entries) do
+    result[#result + 1] = {
+      action = entry[1], label = entry[2],
+      x = x, y = screen_height - 103, w = button_width, h = 20,
+    }
+    x = x + button_width + gap
+  end
+  return result
+end
+
 -- Pages remain stable as focus moves within a page; the component chips do
 -- not jump around on every J/K keypress. Both click arrows and PageUp/Down
 -- navigate to the first component of the adjacent page.

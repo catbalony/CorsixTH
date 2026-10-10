@@ -1164,6 +1164,24 @@ local function RenderAssembly(canvas, sw, sh)
       active_rect[1] - 1, active_rect[2] - 1,
       active_rect[3] + 2, active_rect[4] + 2)
   end
+  -- Native-looking edit buttons use the same commands as keyboard input.
+  -- The toolbar overlays only the reserved inspector footer, not game pixels.
+  canvas:drawRect(canvas:mapRGB(18, 18, 18), 0, sh - 108, sw, 29)
+  for _, action in ipairs(Layout.assembly_controls(sw, sh, assembly_mode)) do
+    local enabled = Assembly.can(selected, focus_id, action.action)
+    canvas:drawRect(canvas:mapRGB(enabled and 91 or 56,
+      enabled and 128 or 60, enabled and 139 or 64),
+      action.x, action.y, action.w, action.h)
+    canvas:drawRect(canvas:mapRGB(22, 26, 28),
+      action.x + 1, action.y + 1, action.w - 2, action.h - 2)
+    DrawFittedText(canvas, action.label, action.x + 6, action.y + 5, action.w - 12)
+    if enabled then
+      assembly_hit_boxes[#assembly_hit_boxes + 1] = {
+        kind = "action", action = action.action,
+        x = action.x, y = action.y, w = action.w, h = action.h,
+      }
+    end
+  end
   -- A long checked set must never become a clipped single line. Keep a
   -- short, clickable window of component IDs near the focused component.
   local desc = assembly_mode .. "  " .. composite_w .. "x" .. composite_h ..
@@ -1183,7 +1201,6 @@ local function RenderAssembly(canvas, sw, sh)
     active_idx, #selected, AssemblyPageCapacity())
   details = details .. "  page " .. page_number .. "/" .. page_count
   DrawFittedText(canvas, details, 8, sh - 59, sw - 16)
-  assembly_hit_boxes = {}
   local cell_w = sw < 520 and 56 or 70
   local visible = AssemblyPageCapacity()
   local first, last, page, pages = Layout.assembly_page(active_idx, #selected, visible)
@@ -1435,7 +1452,8 @@ local function RenderHelp(canvas, sw, sh)
     "Assembly: V toggle   M strip/layers   ,/. reorder",
     "          J/K focus  PgUp/Dn pages  Home/End ends",
     "          Click overview track to seek wide strips",
-    "          arrows pan or nudge   N copies   R reset",
+    "          Edit buttons: order, copies, XY offsets, reset",
+    "          arrows pan/nudge   Shift+arrows x8   N copies",
     "Frames:   T toggle   Space play   Left/Right step",
     "          [/]: FPS   L loop/once/pingpong   H align",
     "Files:    Ctrl+S save recipe   Ctrl+O load recipe",
