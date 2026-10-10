@@ -62,7 +62,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         shutil.copytree(extracted / 'usr/share/corsix-th/Lua', lua_root)
     for module in ('sprite_viewer.lua', 'sprite_viewer_recipe.lua',
                    'sprite_viewer_browser.lua', 'sprite_viewer_selection.lua',
-                   'sprite_viewer_layout.lua'):
+                   'sprite_viewer_layout.lua', 'sprite_viewer_assembly.lua'):
         shutil.copy2(here / 'CorsixTH/Lua' / module, lua_root / module)
     (lua_root / 'debug_script.lua').write_text('corsixth.require("sprite_viewer")()\n')
     # Each invocation gets a fresh output directory. Never accept stale PNGs or
@@ -290,6 +290,23 @@ def run(args: argparse.Namespace) -> None:
                         last_overview_big = capture_overview_click(788, 600)
                     x.resize_window(640, 480)
                     require(x.window_size() == (640, 480), 'Assembly restore failed')
+                if args.assembly_edit_check:
+                    # 640x480 toolbar positions, calculated by Layout.assembly_controls.
+                    # The edited values are verified from the *real* saved SVR1
+                    # file, not merely by looking for button labels in a PNG.
+                    require(x.window_size() == (640, 480),
+                            'edit controls require the baseline 640x480 viewport')
+                    x.click_window(126, 387)  # focused #9: Order <
+                    x.click_window(417, 387)  # Copies +, from 1 to 2
+                    x.key('x')                 # strip editor screenshot
+                    x.key('m')                 # enter layers
+                    shift = x.code('Shift_L')
+                    x.down(shift)
+                    try: x.click_window(320, 387)  # X +, Shift = 8 px
+                    finally: x.up(shift)
+                    x.click_window(500, 387) # Y +, 1 px
+                    x.key('x')                # layer editor screenshot
+                    x.key('m')                # strip, preserve hidden offsets
                 x.key('s', 'Control_L')
                 x.key('x')
                 time.sleep(.7)
@@ -320,8 +337,18 @@ def run(args: argparse.Namespace) -> None:
     require(recipe.is_file(), 'native viewer did not write the requested recipe')
     lines = recipe.read_text().strip().splitlines()
     require(lines[0] == 'SVR1\tData\tPANEL04V\tcomplex\tstrip', 'incorrect recipe metadata')
-    require([int(line.split('\t')[0]) for line in lines[1:]] == list(range(1, 10)),
-            f'native shift-selection did not select ECG frames 1..9: {lines}')
+    if args.assembly_edit_check:
+        expected_order = [1,2,3,4,5,6,7,9,8]
+        require([int(line.split('\t')[0]) for line in lines[1:]] == expected_order,
+                f'actual mouse reorder did not update recipe: {lines}')
+        # Saved offsets survive switching out of layers; repetitions survive
+        # switching out of strip. Neither edit affects the original art.
+        edited = [line.split('\t') for line in lines[1:]][7]
+        require(edited == ['9','8','1','2'],
+                f'actual SDL edit controls saved wrong values: {edited}')
+    else:
+        require([int(line.split('\t')[0]) for line in lines[1:]] == list(range(1, 10)),
+                f'native shift-selection did not select ECG frames 1..9: {lines}')
     captured = list(screenshots.glob('SpriteViewer_Data_PANEL04V_*.png'))
     require(captured, 'native SDL screenshot missing')
     dimensions = set()
@@ -391,6 +418,8 @@ def main() -> None:
     p.add_argument('--resize-check', action='store_true', help='verify supported real SDL X11 800x600/640x480 resize and screenshots')
     p.add_argument('--assembly-navigation-check', action='store_true',
                    help='exercise stable assembly pages and click the overview in real X11')
+    p.add_argument('--assembly-edit-check', action='store_true',
+                   help='edit copies, order and layer offsets using real SDL mouse events')
     args = p.parse_args()
     try: run(args)
     except Exception as ex:
