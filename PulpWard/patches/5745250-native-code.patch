@@ -1,0 +1,649 @@
+diff --git a/tests/test_native_integrity_gate.py b/tests/test_native_integrity_gate.py
+new file mode 100644
+index 0000000..fe9ed1f
+--- /dev/null
++++ b/tests/test_native_integrity_gate.py
+@@ -0,0 +1,173 @@
++"""Synthetic, copyright-free native integrity and transactional install checks."""
++from __future__ import annotations
++
++from pathlib import Path
++import struct
++import sys
++import tempfile
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
++from build_private_native_swap import CAST, build
++from native_output_integrity import validate_native_output
++import prepare_private_native_swap as prepare_module
++
++
++NAMES = ('VStart-1.ani', 'VFra-1.ani', 'VList-1.ani',
++         'VEle-1.ani', 'VSpr-0.dat', 'VSpr-0.tab')
++
++
++def native_source(root: Path) -> Path:
++    """Tiny standalone original-format resource set; no Bullfrog pixels."""
++    source = root / 'decoded'
++    source.mkdir()
++    start = bytearray((max(CAST['doctor']) + 1) * 4)
++    frames = bytearray()
++    for index, anim in enumerate(CAST['doctor']):
++        struct.pack_into('<H', start, anim * 4, index)
++        frames.extend(struct.pack('<IBBBBH', 0, 10, 20, 30, 40, index))
++    parts = (start, frames, struct.pack('<HH', 0, 0xffff),
++             struct.pack('<HBBBB', 0, 141, 186, 0, 0),
++             b'\x01\x07', struct.pack('<IBB', 0, 1, 1))
++    for filename, contents in zip(NAMES, parts):
++        (source / filename).write_bytes(contents)
++    return source
++
++
++class NativeIntegrityGate(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        self.root = Path(self.tmp.name)
++        self.source = native_source(self.root)
++        self.target = self.root / 'generated'
++        self.manifest = build(self.source, self.target, ['doctor'])
++
++    def validate(self):
++        validate_native_output(self.source, self.target, self.manifest)
++
++    def corrupt(self, filename: str, offset: int, value: int):
++        path = self.target / filename
++        data = bytearray(path.read_bytes())
++        data[offset] = value
++        path.write_bytes(data)
++
++    def test_valid_output_and_repeat_build_are_identical(self):
++        self.validate()
++        other = self.root / 'again'
++        build(self.source, other, ['doctor'])
++        for name in NAMES:
++            self.assertEqual((self.target / name.upper()).read_bytes(),
++                             (other / name.upper()).read_bytes())
++
++    def test_timing_and_frame_links_fail_closed(self):
++        self.corrupt('VFRA-1.ANI', 4, 99)
++        with self.assertRaisesRegex(ValueError, 'timing/flags/next-frame'):
++            self.validate()
++
++    def test_original_sprite_prefix_mutation_fails_closed(self):
++        self.corrupt('VSPR-0.DAT', 1, 8)
++        with self.assertRaisesRegex(ValueError, 'Original VSpr.dat'):
++            self.validate()
++
++    def test_new_sprite_offset_and_run_corruption_fail_closed(self):
++        sid = 1  # first appended native sprite
++        self.corrupt('VSPR-0.TAB', sid * 6, 0)
++        with self.assertRaisesRegex(ValueError, 'offset is not contiguous'):
++            self.validate()
++
++    def test_corrupt_native_rle_fails_closed(self):
++        old_length = len((self.source / 'VSpr-0.dat').read_bytes())
++        self.corrupt('VSPR-0.DAT', old_length, 0)
++        with self.assertRaisesRegex(ValueError, 'line command'):
++            self.validate()
++
++    def test_dangling_frame_element_fails_closed(self):
++        path = self.target / 'VELE-1.ANI'
++        data = bytearray(path.read_bytes())
++        struct.pack_into('<H', data, 6, 65532)
++        path.write_bytes(data)
++        with self.assertRaisesRegex(ValueError, 'invalid sprite-table reference'):
++            self.validate()
++
++    def test_unexpected_frame_list_mutation_fails_closed(self):
++        self.corrupt('VFRA-1.ANI', 0, 0)
++        with self.assertRaisesRegex(ValueError, 'Unexpected set of modified native frames'):
++            self.validate()
++
++
++class TransactionalPrivatePrepare(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        self.root = Path(self.tmp.name)
++        self.original = self.root / 'original-game'
++        for dirname in ('DATA', 'QDATA', 'DATAM', 'QDATAM', 'LEVELS'):
++            (self.original / dirname).mkdir(parents=True)
++            (self.original / dirname / 'sentinel.txt').write_text(dirname)
++        for name in prepare_module.PATCH_NAMES:
++            (self.original / 'DATA' / name.lower()).write_bytes(b'original')
++        self.out = self.root / 'prepared-game'
++        self.source = self.root / 'decoded'
++        self.source.mkdir()
++
++    def fake_build(self, src, output, *args, **kwargs):
++        output.mkdir()
++        for name in prepare_module.PATCH_NAMES:
++            (output / name).write_bytes(b'patched-' + name.encode('ascii'))
++        return {'frame_replacements': 1, 'unique_frames_modified': 1, 'objects': []}
++
++    def prepare(self):
++        with patch.object(prepare_module, 'build', side_effect=self.fake_build):
++            return prepare_module.prepare(self.original, self.source, self.out)
++
++    def test_complete_copy_only_visible_after_success(self):
++        result = self.prepare()
++        self.assertEqual(result['frame_replacements'], 1)
++        self.assertEqual((self.out / 'LEVELS' / 'sentinel.txt').read_text(), 'LEVELS')
++        for name in prepare_module.PATCH_NAMES:
++            self.assertEqual((self.out / 'DATA' / name.lower()).read_bytes(),
++                             b'patched-' + name.encode('ascii'))
++            self.assertEqual((self.original / 'DATA' / name.lower()).read_bytes(), b'original')
++        self.assertEqual(list(self.root.glob('.prepared-game.staging-*')), [])
++
++    def test_interrupted_copy_does_not_publish(self):
++        copytree = prepare_module.shutil.copytree
++        calls = 0
++        def interrupt(src, dst, *args, **kwargs):
++            nonlocal calls
++            calls += 1
++            if calls == 2:
++                raise OSError('synthetic copy interruption')
++            return copytree(src, dst, *args, **kwargs)
++        with patch.object(prepare_module, 'build', side_effect=self.fake_build), \
++             patch.object(prepare_module.shutil, 'copytree', side_effect=interrupt):
++            with self.assertRaisesRegex(OSError, 'interruption'):
++                prepare_module.prepare(self.original, self.source, self.out)
++        self.assertFalse(self.out.exists())
++        self.assertEqual(list(self.root.glob('.prepared-game.staging-*')), [])
++
++    def test_existing_destination_is_never_changed(self):
++        self.out.mkdir()
++        (self.out / 'owner.txt').write_text('keep')
++        with self.assertRaises(FileExistsError):
++            self.prepare()
++        self.assertEqual((self.out / 'owner.txt').read_text(), 'keep')
++
++    def test_destination_appearing_during_copy_is_never_overwritten(self):
++        publish = prepare_module._publish_without_replacement
++        def race(stage, target):
++            target.mkdir()
++            (target / 'owner.txt').write_text('created-by-another-run')
++            publish(stage, target)
++        with patch.object(prepare_module, 'build', side_effect=self.fake_build), \
++             patch.object(prepare_module, '_publish_without_replacement', side_effect=race):
++            with self.assertRaises(FileExistsError):
++                prepare_module.prepare(self.original, self.source, self.out)
++        self.assertEqual((self.out / 'owner.txt').read_text(), 'created-by-another-run')
++        self.assertEqual(list(self.root.glob('.prepared-game.staging-*')), [])
++
++    def test_owned_source_is_never_a_valid_destination(self):
++        with self.assertRaisesRegex(ValueError, 'original game directory'):
++            prepare_module.prepare(self.original, self.source, self.original / 'DATA' / 'new')
+diff --git a/tests/test_native_material_contract.py b/tests/test_native_material_contract.py
+new file mode 100644
+index 0000000..74a30f9
+--- /dev/null
++++ b/tests/test_native_material_contract.py
+@@ -0,0 +1,108 @@
++"""Copyright-free checks for stable native paint order and material geometry."""
++from __future__ import annotations
++
++import hashlib
++import struct
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
++from native_output_integrity import validate_material_rewrite, validate_native_output, NAMES
++from build_private_native_swap import CAST, build
++
++
++class LayerContractTests(unittest.TestCase):
++    def setUp(self):
++        # One selected cabinet layer, one non-material actor, and one clone.
++        self.elements = bytearray()
++        self.elements.extend(struct.pack('<HBBBB', 0, 144, 190, 3, 8))
++        self.elements.extend(struct.pack('<HBBBB', 6, 145, 185, 0, 2))
++        self.elements.extend(struct.pack('<HBBBB', 12, 144, 190, 3, 8))
++        self.tab = bytearray()
++        for offset, w, h in ((0, 9, 11), (4, 8, 15), (7, 9, 11)):
++            self.tab.extend(struct.pack('<IBB', offset, w, h))
++        self.selected = frozenset({0})
++
++    def check(self, after=None, elements=None, tab=None):
++        validate_material_rewrite([0, 1], [2, 1] if after is None else after,
++                                  self.elements if elements is None else elements,
++                                  self.tab if tab is None else tab,
++                                  self.selected, 'machine frame')
++
++    def test_valid_recolour_keeps_layer_count_order_flags_and_dimensions(self):
++        self.check()
++
++    def test_missing_or_reordered_elements_fail(self):
++        for value, msg in (([2], 'layer count'), ([1, 2], 'offset or conditional layer flags')):
++            with self.subTest(value=value), self.assertRaisesRegex(ValueError, msg):
++                self.check(value)
++
++    def test_changing_actor_layer_is_rejected(self):
++        with self.assertRaisesRegex(ValueError, 'non-material layer'):
++            self.check([2, 0])
++
++    def test_changing_native_offset_or_conditions_is_rejected(self):
++        modified = bytearray(self.elements)
++        modified[2 * 6 + 3] ^= 1
++        with self.assertRaisesRegex(ValueError, 'offset or conditional layer flags'):
++            self.check(elements=modified)
++
++    def test_material_sprite_shape_must_be_unchanged(self):
++        modified = bytearray(self.tab)
++        modified[2 * 6 + 4] = 10
++        with self.assertRaisesRegex(ValueError, 'sprite dimensions'):
++            self.check(tab=modified)
++
++    def test_dangling_indices_are_rejected(self):
++        with self.assertRaisesRegex(ValueError, 'invalid layer element'):
++            self.check([3, 1])
++        corrupted = bytearray(self.elements)
++        struct.pack_into('<H', corrupted, 2 * 6, 17)
++        with self.assertRaisesRegex(ValueError, 'invalid sprite reference'):
++            self.check(elements=corrupted)
++
++    def test_unselected_frame_is_not_treated_as_a_successful_material_pass(self):
++        with self.assertRaisesRegex(ValueError, 'no selected material sprite'):
++            validate_material_rewrite([1], [1], self.elements, self.tab,
++                                      self.selected, 'machine frame')
++
++
++class BuildFingerprintTests(unittest.TestCase):
++    def test_reproducible_private_fingerprints_and_corruption(self):
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            source = root / 'source'
++            source.mkdir()
++            start = bytearray((max(CAST['doctor']) + 1) * 4)
++            frames = bytearray()
++            for i, anim in enumerate(CAST['doctor']):
++                struct.pack_into('<H', start, anim * 4, i)
++                frames.extend(struct.pack('<IBBBBH', 0, 0, 0, 0, 0, i))
++            originals = (start, frames, struct.pack('<HH', 0, 0xffff),
++                         struct.pack('<HBBBB', 0, 141, 186, 0, 0),
++                         b'\x01\x01', struct.pack('<IBB', 0, 1, 1))
++            for name, contents in zip(NAMES, originals):
++                (source / name).write_bytes(contents)
++            a = root / 'a'
++            b = root / 'b'
++            manifest = build(source, a, ['doctor'])
++            second = build(source, b, ['doctor'])
++            self.assertEqual(manifest['input_sha256'], second['input_sha256'])
++            self.assertEqual(manifest['output_sha256'], second['output_sha256'])
++            for name in NAMES:
++                self.assertEqual(manifest['input_sha256'][name],
++                                 hashlib.sha256((source / name).read_bytes()).hexdigest())
++                self.assertEqual(manifest['output_sha256'][name],
++                                 hashlib.sha256((a / name.upper()).read_bytes()).hexdigest())
++            validate_native_output(source, a, manifest)
++            forged = dict(manifest)
++            forged['output_sha256'] = dict(manifest['output_sha256'])
++            forged['output_sha256']['VFra-1.ani'] = '00' * 32
++            with self.assertRaisesRegex(ValueError, 'fingerprints do not match'):
++                validate_native_output(source, a, forged)
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_private_native_swap.py b/tests/test_private_native_swap.py
+index 8ef3d03..e8a0640 100644
+--- a/tests/test_private_native_swap.py
++++ b/tests/test_private_native_swap.py
+@@ -259,6 +259,10 @@ class TestNativeTransformation(unittest.TestCase):
+         self.assertEqual(expanded,bytes((255,12,13,255,255,14,15,255)))
+         with self.assertRaisesRegex(ValueError,'no visible pixels'):
+             crop_indexed_to_opaque(bytes([255]*20),5,4)
++        moving=bytearray(src)
++        moving[0]=19  # a hand escapes the reference's fixed crop rectangle
++        with self.assertRaisesRegex(ValueError,'outside stable crop'):
++            crop_indexed_to_opaque(bytes(moving),5,4,reference=src,x_padding=1)
+ 
+     def test_prevents_overwriting_owned_source(self):
+         from build_private_native_swap import build
+diff --git a/tools/build_private_native_swap.py b/tools/build_private_native_swap.py
+index 80e6588..ee9029c 100644
+--- a/tools/build_private_native_swap.py
++++ b/tools/build_private_native_swap.py
+@@ -10,11 +10,13 @@ In particular, Standard Male Patient walks with 16/18, NOT 182/184 (doors).
+ from __future__ import annotations
+ 
+ import argparse
++import hashlib
+ import json
+ import struct
+ import statistics
+ from pathlib import Path
+ from native_treatment_colour import read_palette, tonal_lookup, recolour_pixels
++from native_output_integrity import validate_native_output, validate_material_rewrite
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ NAMES = ('VStart-1.ani', 'VFra-1.ani', 'VList-1.ani', 'VEle-1.ani', 'VSpr-0.dat', 'VSpr-0.tab')
+@@ -247,6 +249,11 @@ def crop_indexed_to_opaque(pixels: bytes, width: int, height: int,
+     x0, x1, y0, y1 = (max(0, min(xs) - x_padding),
+                       min(width, max(xs) + 1 + x_padding),
+                       min(ys), max(ys) + 1)
++    # Moving hands/arms may extend beyond the reference silhouette. Reject
++    # those poses rather than slicing off a limb in one frame of the loop.
++    if any(px != 255 and not (x0 <= i % width < x1 and y0 <= i // width < y1)
++           for i, px in enumerate(pixels)):
++        raise ValueError('Treatment pose has visible pixels outside stable crop')
+     cropped = bytes(pixels[y * width + x] for y in range(y0, y1)
+                     for x in range(x0, x1))
+     return cropped, x1 - x0, y1 - y0
+@@ -747,6 +754,8 @@ def build(src: Path, dst: Path, cast: list[str], objects: list[str] | None = Non
+                         changed = True
+                     if not changed:
+                         raise ValueError(f'No verified {kind} material in animation {anim_id} frame {fid}')
++                    validate_material_rewrite(old_ids, new_ids, elems, vtab, wanted,
++                                              f'{kind} animation {anim_id} frame {fid}')
+                     if fid in modified_for_material:
+                         raise ValueError(f'Overlapping material animation frame {fid}')
+                     modified_for_material.add(fid)
+@@ -771,6 +780,15 @@ def build(src: Path, dst: Path, cast: list[str], objects: list[str] | None = Non
+         'material_frame_count': len(material_records),
+         'unique_frames_modified': len(set(r[2] for r in records)),
+     }
++    # Per-resource checksums make two private builds directly comparable;
++    # never include the original game bytes in the public source checkout.
++    summary['input_sha256'] = {
++        name: hashlib.sha256((src / name).read_bytes()).hexdigest() for name in NAMES
++    }
++    summary['output_sha256'] = {
++        name: hashlib.sha256(data[name]).hexdigest() for name in NAMES
++    }
++    validate_native_output(src, dst, summary)
+     (dst / 'native_swap_manifest.json').write_text(json.dumps(summary, indent=2))
+     print(f'NATIVE SWAP: {len(cast)} classes; {len(objects)} direct object types; '
+           f'{len(records)} frame modifications touching {summary["unique_frames_modified"]} distinct frames; '
+diff --git a/tools/native_output_integrity.py b/tools/native_output_integrity.py
+new file mode 100644
+index 0000000..741be3a
+--- /dev/null
++++ b/tools/native_output_integrity.py
+@@ -0,0 +1,180 @@
++"""Fail-closed verification of generated private Theme Hospital native tables.
++
++Checks only the builder's append-only contract; never requires or bundles
++proprietary original resources. Call before making a new private install visible.
++"""
++from __future__ import annotations
++
++import hashlib
++import struct
++from pathlib import Path
++
++NAMES = ('VStart-1.ani', 'VFra-1.ani', 'VList-1.ani',
++         'VEle-1.ani', 'VSpr-0.dat', 'VSpr-0.tab')
++
++
++def _u16(data: bytes, index: int) -> int:
++    return struct.unpack_from('<H', data, index)[0]
++
++
++def _u32(data: bytes, index: int) -> int:
++    return struct.unpack_from('<I', data, index)[0]
++
++
++def _check_new_sprite(payload: bytes, width: int, height: int, sprite_id: int) -> None:
++    if not width or not height:
++        raise ValueError(f'New sprite {sprite_id} has zero dimensions')
++    pos = 0
++    drawn = 0
++    area = width * height
++    while drawn < area:
++        if pos >= len(payload):
++            raise ValueError(f'Truncated native RLE in sprite {sprite_id}')
++        token = payload[pos]
++        pos += 1
++        if token == 0:  # Newly authored sprites never use native end-of-line opcodes.
++            raise ValueError(f'Unexpected native RLE line command in sprite {sprite_id}')
++        if token < 128:
++            if pos + token > len(payload):
++                raise ValueError(f'Truncated literal in sprite {sprite_id}')
++            pos += token
++            drawn += token
++        else:
++            drawn += 256 - token
++        if drawn > area:
++            raise ValueError(f'Native RLE overflows sprite {sprite_id}')
++    if pos != len(payload):
++        raise ValueError(f'Trailing native RLE data in sprite {sprite_id}')
++
++
++
++def validate_material_rewrite(before_ids: list[int], after_ids: list[int],
++                              elements: bytes | bytearray, sprite_table: bytes | bytearray,
++                              selected_sprites: frozenset[int], label: str) -> None:
++    """Verify a layered palette change without flattening or shifting geometry.
++
++    Called for *each* rewritten material frame against the composition that
++    existed immediately before that material pass. This also covers GP frames
++    which already contain a newly generated doctor between desk components.
++    """
++    if len(before_ids) != len(after_ids):
++        raise ValueError(f'{label}: changed native layer count')
++    if len(elements) % 6 or len(sprite_table) % 6:
++        raise ValueError(f'{label}: malformed native element/sprite table')
++    element_count = len(elements) // 6
++    sprite_count = len(sprite_table) // 6
++    replacements = 0
++    for index, (before_id, after_id) in enumerate(zip(before_ids, after_ids)):
++        if not 0 <= before_id < element_count or not 0 <= after_id < element_count:
++            raise ValueError(f'{label}: invalid layer element at {index}')
++        old = elements[before_id * 6:before_id * 6 + 6]
++        new = elements[after_id * 6:after_id * 6 + 6]
++        old_ref, new_ref = _u16(old, 0), _u16(new, 0)
++        if (old_ref % 6 or new_ref % 6 or
++                old_ref // 6 >= sprite_count or new_ref // 6 >= sprite_count):
++            raise ValueError(f'{label}: invalid sprite reference at layer {index}')
++        old_sprite, new_sprite = old_ref // 6, new_ref // 6
++        if old_sprite not in selected_sprites:
++            if before_id != after_id:
++                raise ValueError(f'{label}: non-material layer replaced at {index}')
++            continue
++        replacements += 1
++        if before_id == after_id or old_sprite == new_sprite:
++            raise ValueError(f'{label}: selected material layer was not replaced at {index}')
++        if old[2:] != new[2:]:
++            raise ValueError(f'{label}: offset or conditional layer flags changed at {index}')
++        if (sprite_table[old_sprite * 6 + 4:old_sprite * 6 + 6] !=
++                sprite_table[new_sprite * 6 + 4:new_sprite * 6 + 6]):
++            raise ValueError(f'{label}: material sprite dimensions changed at {index}')
++    if not replacements:
++        raise ValueError(f'{label}: no selected material sprite in frame')
++
++def validate_native_output(source: Path, output: Path, manifest: dict) -> None:
++    """Validate timing, frame indirection, ordered elements and appended RLE.
++
++    Original record bytes must be immutable. Modified frames may only change
++    their VList offset, never the engine's next-frame/time/sound/flags bytes.
++    """
++    before = [(source / name).read_bytes() for name in NAMES]
++    after = [(output / name.upper()).read_bytes() for name in NAMES]
++    start, frames, lists, elems, dat, tab = before
++    new_start, new_frames, new_lists, new_elems, new_dat, new_tab = after
++
++
++    for table, data, width in [('VFra', frames, 10), ('VList', lists, 2),
++                               ('VEle', elems, 6), ('VSpr.tab', tab, 6)]:
++        if len(data) % width:
++            raise ValueError(f'Unaligned original {table} table')
++    if new_start != start:
++        raise ValueError('Native animation start table changed')
++    if len(new_frames) != len(frames):
++        raise ValueError('Native animation frame count changed')
++    for name, old, new in [('VList', lists, new_lists), ('VEle', elems, new_elems),
++                            ('VSpr.dat', dat, new_dat), ('VSpr.tab', tab, new_tab)]:
++        if not new.startswith(old):
++            raise ValueError(f'Original {name} resource was changed')
++    if len(new_lists) % 2 or len(new_elems) % 6 or len(new_tab) % 6:
++        raise ValueError('Appended native tables are not record-aligned')
++    if len(new_tab) // 6 > 10923:  # sprite ID stored as 6-byte offset in u16
++        raise ValueError('Native sprite-table offset exceeds 16 bits')
++
++    old_list_count = len(lists) // 2
++    element_count = len(new_elems) // 6
++    sprite_count = len(new_tab) // 6
++    changed = set()
++    for fid in range(len(frames) // 10):
++        position = fid * 10
++        if new_frames[position + 4:position + 10] != frames[position + 4:position + 10]:
++            raise ValueError(f'Native timing/flags/next-frame changed in frame {fid}')
++        old_index = _u32(frames, position)
++        new_index = _u32(new_frames, position)
++        if old_index == new_index:
++            continue
++        changed.add(fid)
++        if new_index < old_list_count or new_index >= len(new_lists) // 2:
++            raise ValueError(f'Frame {fid} points outside appended element lists')
++        for step in range(128):
++            index = (new_index + step) * 2
++            if index + 2 > len(new_lists):
++                raise ValueError(f'Unterminated new element list in frame {fid}')
++            eid = _u16(new_lists, index)
++            if eid == 0xffff:
++                break
++            if eid >= element_count:
++                raise ValueError(f'Frame {fid} refers to missing element {eid}')
++        else:
++            raise ValueError(f'Unterminated new element list in frame {fid}')
++
++    expected = {int(row[2]) for row in manifest['entries']}
++    if changed != expected or len(changed) != manifest['unique_frames_modified']:
++        raise ValueError('Unexpected set of modified native frames')
++    if manifest['new_sprites'] != sprite_count - len(tab) // 6:
++        raise ValueError('Appended sprite count does not match manifest')
++
++    for eid in range(len(elems) // 6, element_count):
++        offset = _u16(new_elems, eid * 6)
++        if offset % 6 or offset // 6 >= sprite_count:
++            raise ValueError(f'New element {eid} has invalid sprite-table reference')
++
++    prev_offset = len(dat)
++    for sid in range(len(tab) // 6, sprite_count):
++        offset, width, height = struct.unpack_from('<IBB', new_tab, sid * 6)
++        if offset != prev_offset:
++            raise ValueError(f'Appended sprite {sid} offset is not contiguous')
++        end = _u32(new_tab, (sid + 1) * 6) if sid + 1 < sprite_count else len(new_dat)
++        if end <= offset or end > len(new_dat):
++            raise ValueError(f'Invalid sprite offsets for appended sprite {sid}')
++        _check_new_sprite(new_dat[offset:end], width, height, sid)
++        prev_offset = end
++    if prev_offset != len(new_dat):
++        raise ValueError('Trailing unindexed native sprite data')
++
++    # Fingerprints make it possible to diagnose mismatched private game-data
++    # installs without storing or publishing any original copyrighted bytes.
++    for key, blobs in (('input_sha256', before), ('output_sha256', after)):
++        expected_hashes = manifest.get(key)
++        if expected_hashes is not None:
++            actual = {name: hashlib.sha256(blob).hexdigest()
++                      for name, blob in zip(NAMES, blobs)}
++            if expected_hashes != actual:
++                raise ValueError(f'{key} native resource fingerprints do not match')
+diff --git a/tools/prepare_private_native_swap.py b/tools/prepare_private_native_swap.py
+index 57e863e..decf3a2 100644
+--- a/tools/prepare_private_native_swap.py
++++ b/tools/prepare_private_native_swap.py
+@@ -5,12 +5,42 @@ Use only with original Theme Hospital assets you legally possess. Never
+ redistribute the resulting game-data folder; it contains copied Bullfrog art.
+ """
+ import argparse
++import ctypes
++import hashlib
++import os
+ from pathlib import Path
+ import shutil
++import sys
++import tempfile
+ from build_private_native_swap import build, CAST, OBJECTS, EXTRA_OBJECTS
+ 
+ PATCH_NAMES=('VSTART-1.ANI','VFRA-1.ANI','VLIST-1.ANI','VELE-1.ANI','VSPR-0.DAT','VSPR-0.TAB')
+ 
++
++def _publish_without_replacement(staged: Path, destination: Path) -> None:
++    """Atomically publish only if destination doesn't exist, including a race.
++
++    POSIX os.rename may silently replace an *empty* destination directory, so
++    use Linux renameat2(RENAME_NOREPLACE). Windows os.rename already refuses
++    any existing destination. Never delete a destination owned by another run.
++    """
++    if os.name == 'nt':
++        os.rename(staged, destination)
++    elif sys.platform == 'linux':
++        libc = ctypes.CDLL(None, use_errno=True)
++        renameat2 = libc.renameat2
++        renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p,
++                              ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
++        renameat2.restype = ctypes.c_int
++        if renameat2(-100, os.fsencode(staged), -100, os.fsencode(destination), 1) != 0:
++            error = ctypes.get_errno()
++            raise OSError(error, os.strerror(error), str(destination))
++    else:
++        # A check-then-rename on other Unix variants could overwrite a racing
++        # empty directory. Fail closed rather than silently replacing it.
++        raise RuntimeError('Atomic no-replace publish requires Windows or Linux')
++
++
+ def prepare(original:Path,decoded:Path,destination:Path, gp_treatment:bool=False, room_treatments:bool=False,
+             composite_treatments:bool=False, palette:Path|None=None,
+             expanded_objects:bool=False, native_materials:bool=False):
+@@ -23,32 +53,36 @@ def prepare(original:Path,decoded:Path,destination:Path, gp_treatment:bool=False
+     required=['DATA','QDATA','DATAM','QDATAM','LEVELS']
+     for part in required:
+         if not (original/part).is_dir():raise FileNotFoundError(original/part)
+-    patchdir=destination.parent/(destination.name+'.patch-stage')
+-    if patchdir.exists():raise FileExistsError(patchdir)
+-    try:
++    # The final directory is never visible until all native output has passed
++    # build-time structural checks and every original source file is copied.
++    destination.parent.mkdir(parents=True,exist_ok=True)
++    with tempfile.TemporaryDirectory(prefix=f'.{destination.name}.staging-',
++                                     dir=destination.parent) as workspace:
++        work = Path(workspace)
++        patchdir = work/'native-patch'
++        staged = work/'game-data'
+         selected_objects = list(OBJECTS) + (list(EXTRA_OBJECTS) if expanded_objects else [])
+         manifest=build(decoded, patchdir, list(CAST), selected_objects,
+                        gp_treatment=gp_treatment, room_treatments=room_treatments,
+                        composite_treatments=composite_treatments, palette_path=palette,
+                        native_materials=native_materials)
+-        destination.mkdir(parents=True)
+-        for directory in original.iterdir():
+-            if directory.is_dir():
+-                shutil.copytree(directory,destination/directory.name)
+-            elif directory.is_file():
+-                shutil.copy2(directory,destination/directory.name)
+-        data=destination/'DATA'
++        staged.mkdir()
++        for item in original.iterdir():
++            if item.is_dir():
++                shutil.copytree(item,staged/item.name)
++            elif item.is_file():
++                shutil.copy2(item,staged/item.name)
++        data=staged/'DATA'
+         # Case-insensitive lookup handles older Windows and Linux CD versions.
+         for name in PATCH_NAMES:
+             candidates=[f for f in data.iterdir() if f.name.upper()==name]
+             if len(candidates)!=1:raise FileNotFoundError('Expected '+name+' in private DATA')
+-            shutil.copy2(patchdir/name,candidates[0])
++            patch = patchdir/name
++            shutil.copy2(patch,candidates[0])
++            if hashlib.sha256(patch.read_bytes()).digest()!=hashlib.sha256(candidates[0].read_bytes()).digest():
++                raise ValueError(f'Private native file copy failed verification: {name}')
++        _publish_without_replacement(staged, destination)
+         return manifest
+-    except Exception:
+-        if destination.exists():shutil.rmtree(destination)
+-        raise
+-    finally:
+-        if patchdir.exists():shutil.rmtree(patchdir)
+ 
+ if __name__=='__main__':
+     parser=argparse.ArgumentParser(description=__doc__)
