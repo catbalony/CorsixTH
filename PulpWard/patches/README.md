@@ -46,3 +46,27 @@ python -m unittest discover -s tests -p 'test_*.py'
 ```
 
 Local result: 42 Python passes, five licensed-resource skips, and all three Lua suites pass. No live gameplay test was run. Only source changes are included; do not upload private saves, original Bullfrog files or binaries.
+
+## Source artwork cleanup — 6e211e6
+
+This fixes **real source-sheet crop contamination** (floating objects and colour fragments) in the original authored indexed sprites: 98 entries, 11,065 opaque pixels removed. All 256 sprite IDs and dimensions are preserved, as are retained colour indices. The native VSPR/ANI frame graph is unchanged.
+
+The patch queue contains two new source-only incremental patches (gzip then base64), following the existing 5745250 and dbcdf57 patches:
+
+1. `6e211e6-audited-source-art-pipeline.patch.gz.b64` — audited source cleanup, compiled-index repair tool, integration into both palette-based sprite generators. Raw patch SHA256 `aec81ae1f6bc2fce6dbbb193ba71c95e5da6d2f6bdff014310af72fcd4b40a85`.
+2. `6e211e6-source-art-tests.patch.gz.b64` — regression tests and audit documentation. Raw patch SHA256 `155d74a25cdd910984da72db123a371e606078933e0a57e6c9504fa7b955b4cf`.
+
+After importing the **public-safe source ZIP** to the experiment branch (never upload the private full Git bundle), run from `PulpWard/`:
+
+```sh
+python -c "import base64,gzip,pathlib; root=pathlib.Path('patches'); names=('6e211e6-audited-source-art-pipeline','6e211e6-source-art-tests'); [(root/(n+'.patch')).write_bytes(gzip.decompress(base64.b64decode((root/(n+'.patch.gz.b64')).read_text()))) for n in names]"
+git apply --check patches/6e211e6-audited-source-art-pipeline.patch
+git apply patches/6e211e6-audited-source-art-pipeline.patch
+git apply --check patches/6e211e6-source-art-tests.patch
+git apply patches/6e211e6-source-art-tests.patch
+python tools/clean_compiled_showcase.py --apply
+python tools/clean_compiled_showcase.py --check
+python -m unittest discover -s tests -p 'test_*.py'
+```
+
+The `--apply` step was independently verified against the supplied public-safe snapshot to regenerate **259 files byte-for-byte** matching the local committed art (256 PNGs plus DAT, TAB and atlas preview). No proprietary palette or game files needed. Local automated results: 42 Python passes / 5 licensed-resource skips, and 3 Lua suites pass. No live playtest was run.
