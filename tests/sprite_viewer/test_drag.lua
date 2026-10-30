@@ -15,6 +15,13 @@ x,y=Drag.position(dneg,87,95,true)
 assert(x==-16 and y==-8, 'negative snapping must round symmetrically')
 x,y=Drag.position(dneg,90000,-90000,false)
 assert(x==4096 and y==-4096, 'drag must respect recipe coordinate limits')
+-- At 8x zoom, 3 screen pixels are less than half one source pixel.
+-- Ctrl snapping must not move a resting off-grid layer on a nearly-still click.
+local tiny = Drag.begin({id=3,dx=7,dy=5}, 1, 100, 100, 8)
+x,y=Drag.position(tiny,103,100,true)
+assert(x==7 and y==5, 'source-pixel jitter must not snap an untouched layer')
+x,y=Drag.position(tiny,104,100,true)
+assert(x==8 and y==8, 'a real source-pixel move should still snap')
 
 Colours={Black=0,White=1,Magenta=2,Cyan=3,Yellow=4}
 local mods={}
