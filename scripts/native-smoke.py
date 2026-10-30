@@ -325,9 +325,10 @@ def run(args: argparse.Namespace) -> None:
                     x.resize_window(800, 600)
                     require(x.window_size() == (800, 600), 'Assembly resize failed')
                     x.key('x')
-                    if args.assembly_navigation_check:
-                        first_overview_big = capture_overview_click(12, 600)
-                        last_overview_big = capture_overview_click(788, 600)
+                    # The nine 88px PANEL04V pieces total 792 source pixels.
+                    # At 800px they fit without panning, so the overview is
+                    # intentionally hidden. Assert size via the screenshots
+                    # below, not by clicking a control that must not exist.
                     x.resize_window(640, 480)
                     require(x.window_size() == (640, 480), 'Assembly restore failed')
                 if args.assembly_pick_check:
@@ -537,8 +538,6 @@ def run(args: argparse.Namespace) -> None:
         require(focus_first < focus_second < focus_last,
                 f'Wheel down did not navigate to the next component: '
                 f'{focus_first} -> {focus_second} -> {focus_last} / {image_width}')
-        if args.resize_check:
-            verify_clicks(first_overview_big, last_overview_big)
     if args.assembly_pick_check:
         try:
             from PIL import Image
