@@ -5,6 +5,7 @@
 
 local Recipe = {}
 local VERSION = "SVR1"
+local MAX_BYTES = 128 * 1024 -- Covers 4096 bounded entries without unbounded IO.
 
 function Recipe.path(root, dir, name, sep)
   if type(root) ~= "string" or root == "" then
@@ -26,8 +27,8 @@ function Recipe.serialize(dir, name, complex, mode, selected)
 end
 
 function Recipe.parse(blob, dir, name, complex, sprite_count)
-  if type(blob) ~= "string" or #blob > 32768 then
-    return nil, "Recipe exceeds 32 KiB"
+  if type(blob) ~= "string" or #blob > MAX_BYTES then
+    return nil, "Recipe exceeds 128 KiB"
   end
   local lines = {}
   for line in blob:gmatch("([^\r\n]+)") do lines[#lines + 1] = line end
@@ -65,6 +66,9 @@ end
 -- are preserved as .bakN, including on Windows (where os.rename does not
 -- replace existing files). The original game's resources are never opened.
 function Recipe.save(path, value, confirm)
+  if type(value) ~= "string" or #value > MAX_BYTES then
+    return false, "Save failed: recipe exceeds 128 KiB", false
+  end
   local prev = io.open(path, "rb")
   local previous
   if prev then previous = prev:read("*a"); prev:close() end
@@ -114,7 +118,7 @@ end
 function Recipe.load(path, dir, name, complex, sprite_count)
   local fh, why = io.open(path, "rb")
   if not fh then return nil, "Load failed: " .. tostring(why) end
-  local blob = fh:read(32769) or ""
+  local blob = fh:read(MAX_BYTES + 1) or ""
   fh:close()
   local parsed, err = Recipe.parse(blob, dir, name, complex, sprite_count)
   if not parsed then return nil, "Recipe not loaded: " .. err end
