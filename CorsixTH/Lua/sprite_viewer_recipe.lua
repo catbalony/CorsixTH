@@ -71,7 +71,8 @@ function Recipe.save(path, value, confirm)
   end
   local prev = io.open(path, "rb")
   local previous
-  if prev then previous = prev:read("*a"); prev:close() end
+  -- Bound the comparison read; os.rename still retains the entire old file as a backup.
+  if prev then previous = prev:read(MAX_BYTES + 1); prev:close() end
   if previous == value then return true, "Already saved", false end
   if previous and not confirm then
     return false, "File exists. Ctrl+S again to replace your saved recipe.", true
