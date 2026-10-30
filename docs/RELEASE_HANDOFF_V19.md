@@ -107,3 +107,37 @@ successful acceptance from committed tests.
 are recorded, no untriaged critical/major bugs exist, and the source-only
 handoff package is verified. Otherwise keep status **NOT YET ACCEPTED**
 and fix only the blockers. No v20 feature expansion.
+
+## 2026-10-31 modern-engine review checkpoint (not branch acceptance)
+
+An offline CorsixTH workbench was supplied, pinned to upstream commit
+`e5138ed8de906ccbf6692299b4375f9312df147e` (2026-10-18).
+That workbench's *unmodified upstream engine* passed its 126 Lua tests,
+eight native C++ tests, full Lua 5.1 syntax pass and an offline rebuild.
+A real Xvfb/XTest run opened the **stock upstream sprite viewer** from its
+normal main menu. These results establish a modern baseline only: the
+engineering branch's overlaid viewer modules and its full native acceptance
+suite have **not** been run against the newer engine. Do not describe this
+as branch QA or as v19 signoff.
+
+The v19 native resize/navigation runner had a definite false-negative:
+the nine 88px ECG pieces total 792px, so the strip overview is intentionally
+hidden at 800px. The runner erroneously clicked that nonexistent control
+and expected overview focus movement at 800x600. The runner now performs
+800x600 screenshot/resize checks without overview clicks; the dedicated
+overview assertions remain at supported 640x480. A pure Lua regression test
+explicitly covers overview-present at 640 versus hidden at 800.
+
+Asset provenance is also important. The supplied 2,875-byte `LEVEL.L1`
+matches the earlier v19 SHA-256 manifest, but caused a corrupt-level popup
+under the newer upstream engine. A separate 163,948-byte `LEVEL.L1` from
+the user's private game installation removed that popup during menu testing.
+Never silently substitute one for the other in a checksum-gated run. The
+game installation still lacks `VIDEO.SAM`, so these results establish menu
+and Sprite Viewer entry only, not a playable campaign.
+
+**Remaining release gate:** run all branch-specific Lua tests against the
+exact updated engineering commit; run real SDL smoke/resize/drag/pick/edit
+checks with the branch viewer overlaid on the intended runtime and valid,
+private assets; complete and record the manual interaction matrix; verify
+the source-only package. Until then, **NOT YET ACCEPTED** still applies.
