@@ -21,7 +21,7 @@ rejects(data .. '1\t0\t0\t1\n', 'line 4')
 rejects(data .. '28\t0\t0\t1\n', 'line 4')
 rejects(data .. '7\t4097\t0\t1\n', 'line 4')
 rejects(data .. '7\t0\t0\t100\n', 'line 4')
-rejects(data .. string.rep('0', 32769), '32 KiB')
+rejects(data .. string.rep('0', 128 * 1024 + 1), '128 KiB')
 local full, no_dir = Recipe.path('', 'Data', 'PANEL04V')
 assert(not full and no_dir:find('Screenshots'))
 assert(Recipe.path('tmp/', 'Data', 'PANEL04V') == 'tmp/SpriteViewer_Data_PANEL04V.svr')
@@ -44,4 +44,23 @@ local parsed = assert(Recipe.load(path, 'Data', 'PANEL04V', true, 28))
 assert(#parsed.items == 2)
 os.remove(path)
 os.remove(path .. '.bak1')
-print('PASS: standalone recipe codec/IO; validation, overwrite confirmation and backup')
+-- Valid bulk selections with large but bounded offsets can exceed 32 KiB.
+-- Saving must never produce a recipe the same loader immediately rejects.
+local large_rows = {}
+for id = 0, 2047 do
+  large_rows[#large_rows + 1] = {id = id, dx = -4096, dy = 4096, repeat_count = 99}
+end
+local large_data = Recipe.serialize('Data', 'PANEL04V', true, 'layers', large_rows)
+assert(#large_data > 32768 and #large_data < 128 * 1024)
+local large_path = 'tests/sprite_viewer/tmp_large_codec_test.svr'
+os.remove(large_path)
+assert(Recipe.save(large_path, large_data, false))
+local large_loaded = assert(Recipe.load(large_path, 'Data', 'PANEL04V', true, 2048))
+assert(#large_loaded.items == 2048 and large_loaded.items[2048].dx == -4096)
+local blocked, reason = Recipe.save(large_path, string.rep('X', 128 * 1024 + 1), true)
+assert(not blocked and reason:find('128 KiB', 1, true))
+local preserved = assert(io.open(large_path, 'rb'))
+assert(preserved:read('*a') == large_data, 'oversized save must preserve existing recipe')
+preserved:close()
+os.remove(large_path)
+print('PASS: standalone recipe codec/IO; validation, overwrite confirmation, backup and large round-trip')
