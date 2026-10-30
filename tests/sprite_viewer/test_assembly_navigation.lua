@@ -42,6 +42,13 @@ assert(Layout.strip_pick(pieces,size,100,8,0)==nil)
 assert(Layout.center_strip(pieces,size,1,320,1)==0)
 assert(Layout.center_strip(pieces,size,4,320,1)==-460)
 assert(Layout.strip_overview({pieces[1]},size,1,640,1,0,8,624)==nil)
+-- Nine 88px ECG sprites require the overview at 640, but fit at 800.
+-- Native resize validation must not click an overview that is hidden.
+local ecg = {}
+for id=1,9 do ecg[id] = {id=id,repeat_count=1} end
+local function ecg_size() return 88,48 end
+assert(Layout.strip_overview(ecg,ecg_size,9,640,1,0,8,624) ~= nil)
+assert(Layout.strip_overview(ecg,ecg_size,9,800,1,0,8,784) == nil)
 assert(Layout.strip_pick({{id=3,repeat_count=3}},size,3,0,10)==nil)
 -- Important Lua vararg edge case: size_of() returns (width, height).
 -- A sprite narrower than its height must map by width, not max(width,height).
