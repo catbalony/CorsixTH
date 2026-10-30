@@ -24,8 +24,15 @@ function Drag.position(start, x, y, snap)
   if math.max(math.abs(dx), math.abs(dy)) < 3 then
     return start.origin_x, start.origin_y
   end
-  local nx = start.origin_x + round(dx / start.zoom)
-  local ny = start.origin_y + round(dy / start.zoom)
+  local source_dx, source_dy = round(dx / start.zoom), round(dy / start.zoom)
+  -- At high zoom, a pointer move may clear the display-pixel threshold
+  -- without moving a full source pixel. Preserve the original coordinate:
+  -- snapping a no-op must not cause an accidental edit or undo snapshot.
+  if source_dx == 0 and source_dy == 0 then
+    return start.origin_x, start.origin_y
+  end
+  local nx = start.origin_x + source_dx
+  local ny = start.origin_y + source_dy
   if snap then
     nx = round(nx / 8) * 8
     ny = round(ny / 8) * 8
