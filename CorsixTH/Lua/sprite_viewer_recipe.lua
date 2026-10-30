@@ -6,6 +6,7 @@
 local Recipe = {}
 local VERSION = "SVR1"
 local MAX_BYTES = 128 * 1024 -- Covers 4096 bounded entries without unbounded IO.
+local MAX_LINES = 4097 -- One header and at most 4096 components.
 
 function Recipe.path(root, dir, name, sep)
   if type(root) ~= "string" or root == "" then
@@ -32,7 +33,7 @@ function Recipe.parse(blob, dir, name, complex, sprite_count)
   end
   local lines = {}
   for line in blob:gmatch("([^\r\n]+)") do lines[#lines + 1] = line end
-  if #lines == 0 or #lines > 4097 then return nil, "Invalid recipe length" end
+  if #lines == 0 or #lines > MAX_LINES then return nil, "Invalid recipe length" end
   local ver, actual_dir, actual_name, format, mode = lines[1]:match(
     "^([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)\t([^\t]+)$")
   if ver ~= VERSION then return nil, "Unsupported recipe version" end
@@ -68,6 +69,14 @@ end
 function Recipe.save(path, value, confirm)
   if type(value) ~= "string" or #value > MAX_BYTES then
     return false, "Save failed: recipe exceeds 128 KiB", false
+  end
+  -- Never write a value that our own parser rejects for excess entries.
+  local line_count = 0
+  for _ in value:gmatch("([^\r\n]+)") do
+    line_count = line_count + 1
+    if line_count > MAX_LINES then
+      return false, "Save failed: too many recipe entries", false
+    end
   end
   local prev = io.open(path, "rb")
   local previous
