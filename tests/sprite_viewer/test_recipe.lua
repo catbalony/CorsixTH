@@ -80,4 +80,15 @@ assert(full_backup:read('*a') == old_large, 'bounded comparison must not truncat
 full_backup:close()
 os.remove(previous_path)
 os.remove(previous_path .. '.bak1')
-print('PASS: standalone recipe codec/IO; bounded read/write, backup and large round-trip')
+-- More than 4096 checked entries could previously be saved, even though
+-- the reader's row bound rejected the exact file on load.
+local too_many = {}
+for id = 0, 4096 do
+  too_many[#too_many + 1] = {id=id, dx=0, dy=0, repeat_count=1}
+end
+local too_many_data = Recipe.serialize('Data', 'PANEL04V', true, 'layers', too_many)
+assert(#too_many_data < 128 * 1024, 'this case must exercise row cap, not byte cap')
+local rejected, explanation = Recipe.save(previous_path, too_many_data, false)
+assert(not rejected and explanation:find('too many', 1, true))
+assert(not Recipe.parse(too_many_data, 'Data', 'PANEL04V', true, 4097))
+print('PASS: standalone recipe codec/IO; bounded byte/row counts, backup and large round-trip')
