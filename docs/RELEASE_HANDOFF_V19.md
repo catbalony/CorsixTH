@@ -141,3 +141,32 @@ exact updated engineering commit; run real SDL smoke/resize/drag/pick/edit
 checks with the branch viewer overlaid on the intended runtime and valid,
 private assets; complete and record the manual interaction matrix; verify
 the source-only package. Until then, **NOT YET ACCEPTED** still applies.
+
+## 2026-10-31 bounded editor regression fixes (local helper verification)
+
+After the modern-engine baseline checkpoint, the engineering branch received
+release-blocker fixes only (no feature expansion):
+
+- A Ctrl-drag that clears the 3-screen-pixel gesture threshold but rounds to
+  zero source-pixel motion no longer snaps an off-grid resting layer onto the
+  grid or creates an accidental history edit.
+- Valid 2048-component recipes with 4096px bounded XY offsets and up to 99
+  copies exceed the previous 32 KiB reader ceiling. Reader and writer now
+  share a bounded 128 KiB maximum, preserving such round trips.
+- The writer also rejects more than 4096 recipe entries before changing any
+  file, matching the parser's row bound.
+- Comparison reads of existing recipes are capped at the byte limit plus one;
+  the **complete** old file is still preserved by filesystem rename into a
+  backup on confirmed replacement, even if that old file is larger.
+
+Focused, reconstructed Lua 5.1-compatible module checks passed locally for
+drag arithmetic, old recipe compatibility, 2048-entry round trips, oversized
+output refusal, oversized prior-file backup preservation, and 4097-entry
+refusal. Corresponding regressions are committed into the branch's
+`tests/sprite_viewer/test_drag.lua` and `test_recipe.lua`.
+
+**Evidence limitation:** these isolated tests are not a full run of the exact
+remote branch integration suite, nor a real SDL/Xvfb overlay test. The v19
+signoff remains **NOT YET ACCEPTED** pending the branch Lua suite, updated
+native matrix, manual checks and verified source-only package. Keep GitHub
+Actions manual-only and do not merge to master from this checkpoint.
