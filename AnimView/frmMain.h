@@ -55,6 +55,7 @@ class frmMain : public wxFrame {
     ID_LAST_ANIM,
     ID_PREV_FRAME,
     ID_NEXT_FRAME,
+    ID_FRAME_SOURCES,
     ID_PLAY_PAUSE,
     ID_TIMER_ANIMATE,
     ID_SEARCH_LAYER_ID,
@@ -96,6 +97,7 @@ class frmMain : public wxFrame {
   void _onLastAnim(wxCommandEvent& evt);
   void _onPrevFrame(wxCommandEvent& evt);
   void _onNextFrame(wxCommandEvent& evt);
+  void _onFrameSources(wxCommandEvent& evt);
   void _onPlayPause(wxCommandEvent& evt);
   void _onToggleMask(wxCommandEvent& evt);
   void _onToggleDrawMood(wxCommandEvent& evt);

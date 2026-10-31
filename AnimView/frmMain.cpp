@@ -31,6 +31,8 @@ SOFTWARE.
 #include <wx/checkbox.h>
 #include <wx/dcclient.h>
 #include <wx/dcmemory.h>
+#include <wx/dialog.h>
+#include <wx/statbmp.h>
 #include <wx/defs.h>
 #include <wx/dir.h>
 #include <wx/dirdlg.h>
@@ -52,7 +54,9 @@ SOFTWARE.
 #include <wx/unichar.h>
 #include <wx/utils.h>
 
+#include <algorithm>
 #include <cstring>
+#include <vector>
 #include <stdexcept>
 
 #include "backdrop.h"
@@ -66,6 +70,7 @@ BEGIN_EVENT_TABLE(frmMain, wxFrame)
   EVT_BUTTON(ID_LAST_ANIM, frmMain::_onLastAnim)
   EVT_BUTTON(ID_PREV_FRAME, frmMain::_onPrevFrame)
   EVT_BUTTON(ID_NEXT_FRAME, frmMain::_onNextFrame)
+  EVT_BUTTON(ID_FRAME_SOURCES, frmMain::_onFrameSources)
   EVT_BUTTON(ID_PLAY_PAUSE, frmMain::_onPlayPause)
   EVT_BUTTON(ID_SEARCH_LAYER_ID, frmMain::_onSearchLayerId)
   EVT_BUTTON(ID_SEARCH_FRAME, frmMain::_onSearchFrame)
@@ -187,6 +192,8 @@ frmMain::frmMain()
   pFrame->Add(m_btnPlayPause,
               wxSizerFlags(1).Align(wxALIGN_CENTER_VERTICAL).Border(wxALL, 1));
   pSidebarSizer->Add(pFrame, fillSizerFlags);
+  pSidebarSizer->Add(new wxButton(this, ID_FRAME_SOURCES, L"Frame sources..."),
+                     fillBorderSizerFlags);
 
   wxSizerFlags layerSizerFlags(0);
   layerSizerFlags.Align(wxALIGN_CENTER).Border(wxALL, 1);
@@ -663,6 +670,97 @@ void frmMain::_onTimer(wxTimerEvent& evt) {
     m_txtFrameIndex->SetValue(wxString::Format(L"%zu", m_iCurrentFrame));
     m_panFrame->Refresh(false);
   }
+}
+
+// A deliberately small, read-only bridge inside the EXISTING AnimView
+// animation window. This is not a second sprite browser or animation editor.
+void frmMain::_onFrameSources(wxCommandEvent& WXUNUSED(evt)) {
+  if (m_iCurrentAnim >= m_oAnims.getAnimationCount()) return;
+  std::vector<THFrameSource> sources;
+  if (!m_oAnims.getFrameSources(m_iCurrentAnim, m_iCurrentFrame,
+                                &m_mskLayers, sources)) {
+    wxMessageBox(L"The current frame has invalid source-element metadata.",
+                 L"Frame sources", wxOK | wxICON_ERROR, this);
+    return;
+  }
+  // Modal inspection freezes the currently displayed frame. The original
+  // playback preference is restored on return. No frame is advanced.
+  const bool was_playing = m_bPlayingAnimation;
+  m_bPlayingAnimation = false;
+  wxDialog dialog(this, wxID_ANY,
+                  wxString::Format(L"Animation #%zu / Frame %zu — sources",
+                                   m_iCurrentAnim, m_iCurrentFrame),
+                  wxDefaultPosition, wxSize(700, 440),
+                  wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+  auto* layout = new wxBoxSizer(wxVERTICAL);
+  layout->Add(new wxStaticText(&dialog, wxID_ANY,
+      L"Source references in drawing order; masked items may not render. "
+      L"A listed element is not proof of visible pixels."),
+      wxSizerFlags(0).Expand().Border(wxALL, 5));
+  auto* body = new wxBoxSizer(wxHORIZONTAL);
+  auto* list = new wxListBox(&dialog, wxID_ANY);
+  for (const auto& src : sources) {
+    wxString label = wxString::Format(
+      L"Element #%zu → sprite #%zu (%u×%u), (%u,%u), layer %u/%u",
+      src.element_id, src.sprite_id, static_cast<unsigned>(src.width),
+      static_cast<unsigned>(src.height), static_cast<unsigned>(src.x),
+      static_cast<unsigned>(src.y), static_cast<unsigned>(src.layer),
+      static_cast<unsigned>(src.layer_id));
+    if (!src.enabled_by_mask) label += L" [masked]";
+    list->Append(label);
+  }
+  body->Add(list, wxSizerFlags(1).Expand().Border(wxALL, 5));
+  auto* inspection = new wxBoxSizer(wxVERTICAL);
+  auto* info = new wxStaticText(&dialog, wxID_ANY,
+      sources.empty() ? L"No source elements in this frame."
+                      : L"Select a source element to inspect its original pixels.");
+  inspection->Add(info, wxSizerFlags(0).Expand().Border(wxALL, 3));
+  auto* preview = new wxStaticBitmap(&dialog, wxID_ANY, wxBitmap(256, 256));
+  inspection->Add(preview, wxSizerFlags(1).Border(wxALL, 5));
+  body->Add(inspection, wxSizerFlags(1).Expand().Border(wxALL, 5));
+  layout->Add(body, wxSizerFlags(1).Expand());
+  auto* close = new wxButton(&dialog, wxID_CANCEL, L"Close");
+  layout->Add(close, wxSizerFlags(0).Align(wxALIGN_RIGHT).Border(wxALL, 5));
+  dialog.SetSizerAndFit(layout);
+  dialog.SetMinSize(wxSize(620, 380));
+
+  // Original AnimView VSPR decoder and MPALETTE, not a generated composite.
+  auto show_source = [&](size_t index) {
+    if (index >= sources.size()) return;
+    const auto& src = sources[index];
+    // Keep the preview bitmap at a fixed size, independent of source
+    // dimensions, so selecting a different element cannot resize the dialog.
+    std::vector<uint8_t> rgb;
+    int zoom = 1;
+    if (!m_oAnims.renderSourcePreview(src.sprite_id, 256, rgb, zoom)) {
+      // Never leave the previously selected sprite displayed on an error.
+      wxImage empty(256, 256, false);
+      std::memset(empty.GetData(), 245, 256 * 256 * 3);
+      preview->SetBitmap(wxBitmap(empty));
+      info->SetLabel(L"Source sprite could not be decoded or has no palette.");
+      dialog.Layout();
+      return;
+    }
+    wxImage image(256, 256, false);
+    std::memcpy(image.GetData(), rgb.data(), rgb.size());
+    preview->SetBitmap(wxBitmap(image));
+    Bitmap* bitmap = m_oAnims.getSpriteBitmap(src.sprite_id);
+    const int w = bitmap->getWidth(), h = bitmap->getHeight();
+    info->SetLabel(wxString::Format(
+        L"VSPR-0 sprite #%zu · %d×%d · %d× preview · flags 0x%X",
+        src.sprite_id, w, h, zoom, static_cast<unsigned>(src.draw_flags)));
+    dialog.Layout();
+  };
+  list->Bind(wxEVT_LISTBOX, [&](wxCommandEvent& event) {
+    const int selection = event.GetSelection();
+    if (selection >= 0) show_source(static_cast<size_t>(selection));
+  });
+  if (!sources.empty()) {
+    list->SetSelection(0);
+    show_source(0);
+  }
+  dialog.ShowModal();
+  m_bPlayingAnimation = was_playing;
 }
 
 void frmMain::_onToggleDrawMood(wxCommandEvent& evt) {
