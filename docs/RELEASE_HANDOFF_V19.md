@@ -170,3 +170,30 @@ remote branch integration suite, nor a real SDL/Xvfb overlay test. The v19
 signoff remains **NOT YET ACCEPTED** pending the branch Lua suite, updated
 native matrix, manual checks and verified source-only package. Keep GitHub
 Actions manual-only and do not merge to master from this checkpoint.
+
+## Subsequent v19 safety pass — exact-input confirmations and cache rollback
+
+Further review found two state-ownership hazards in the existing viewer:
+
+1. A pending Ctrl+S overwrite confirmation was a lone boolean. Changing the
+   checked selection or switching DAT/TAB resources before the second Ctrl+S
+   could overwrite a different recipe without fresh consent. Confirmation is
+   now bound to **both exact output path and serialized recipe bytes**.
+   `test_save_confirmation.lua` drives the real viewer's mocked keyboard
+   handler through an intervening selection change and a table change;
+   it is part of the local/manual Lua suite.
+2. The palette/decoder switch previously cleared `gfx.cache.tabled` before
+   an attempted reload, even if the load failed. Cache replacement now happens
+   inside `ReLoadSameTable` and the prior cache is restored on failure.
+   `test_compact_recovery.lua` now checks old cache identity on both failure
+   paths in addition to its previous selection/visible-error assertions.
+
+These are defensive release fixes, not new features. The focused standalone
+drag/recipe checks run in the local sandbox passed; **the newly added UI
+integration regressions have not yet been run against an exact assembled
+engineering checkout**. Remote GitHub source access and local container build
+assets remain separate in this environment. Do not represent code review,
+test creation or upstream baseline tests as a successful full branch test run.
+
+Release acceptance remains **NOT YET ACCEPTED**. Do not merge to master,
+start automatic Actions, or distribute private Theme Hospital assets.
