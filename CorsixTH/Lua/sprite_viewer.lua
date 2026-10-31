@@ -1221,7 +1221,10 @@ local function RenderSheet(canvas, sw, sh)
   for index = first, last do
     local c = cells[index]
     local y = c.y + y_off
-    if y >= header_height and y < sh and y + c.h > header_height then
+    -- A row whose label has scrolled under the header can still have
+    -- visible sprite pixels. Draw that intersecting row; RenderHeader paints
+    -- the opaque 56px header last, and mouse picking excludes that region.
+    if y < sh and y + c.h > header_height then
       local checked = selected_lookup[c.id] == true
       local focused = c.id == focus_id
       -- Focus is a full label-row cue; checked is a distinct marked box.
