@@ -57,6 +57,18 @@ local function goto_id(id)
 end
 present()
 assert(size_calls >= count, 'first sheet layout must index all sprites')
+-- The first row is 65px tall. Scrolling by 54px puts its label under the
+-- 56px header but leaves visible sprite pixels below it. It must still draw.
+e.mousewheel(nil, 0, -1)
+present()
+local partial_row_drawn = false
+for _, id in ipairs(frame_draws) do
+  if id == 0 then partial_row_drawn = true; break end
+end
+assert(partial_row_drawn,
+  'partially scrolled tall sprite disappeared when its label entered the header')
+e.mousewheel(nil, 0, 1)
+present()
 local base=size_calls
 for _=1,25 do present() end
 assert(size_calls - base < 5000,
