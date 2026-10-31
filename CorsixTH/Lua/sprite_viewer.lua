@@ -475,8 +475,13 @@ end
 local function ReLoadSameTable()
   -- Keep selections and scroll when simply changing the palette or decoding.
   local path = sprite_table_paths[sprite_table_index]
+  -- The old table must remain drawable if the new palette or decoder is bad.
+  -- Only commit the fresh graphics cache after the replacement loaded.
+  local previous_cache = gfx.cache.tabled
+  gfx.cache.tabled = {}
   local loaded, err = TryLoadSheet(path, is_complex, palette_index)
   if not loaded then
+    gfx.cache.tabled = previous_cache
     -- Callers may already have changed the requested format or palette.
     is_complex = last_loaded_complex
     palette_index = last_loaded_palette_index
@@ -559,7 +564,6 @@ local function ChooseBrowserItem()
     LoadTable(hit.index, nil, true)
   else
     palette_index = hit.index
-    gfx.cache.tabled = {}
     ReLoadSameTable()
   end
   MarkDirty()
@@ -816,7 +820,6 @@ local function DoKey(_, rawchar, modifiers)
   -- Preserve the original controls. 'Q' is still handled by DoKeyUp.
   if key == "c" then
     is_complex = not is_complex
-    gfx.cache.tabled = {}
     ReLoadSameTable()
   elseif key == "a" then
     if sprite_table_index > 1 then LoadTable(sprite_table_index - 1, nil, true) end
@@ -827,12 +830,10 @@ local function DoKey(_, rawchar, modifiers)
       OpenBrowser("palette")
     else
       palette_index = palette_index % #palettes + 1
-      gfx.cache.tabled = {}
-      ReLoadSameTable()
+        ReLoadSameTable()
     end
   elseif key == "f" then
     palette_index = Browser.closest_palette(sprite_table_paths[sprite_table_index][2], palettes) or mpalette_index or 1
-    gfx.cache.tabled = {}
     ReLoadSameTable()
   elseif key == "w" then
     wdown = true
