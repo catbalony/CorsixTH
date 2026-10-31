@@ -82,17 +82,23 @@ key('d');frame()
 assert(find('PANEL04V'))
 -- Force palette failure; preserve source and selection after rollback.
 key('space');frame();assert(find('checked 1'))
+local old_palette_cache = gfx.cache.tabled
 fail.palette=true
 key('p');frame()
 assert(find('Sprite load failed'))
 assert(find('checked 1'))
+assert(gfx.cache.tabled == old_palette_cache,
+  'failed palette reload must preserve the previous sprite cache')
 fail.palette=false
 key('p');frame()
 assert(not find('Sprite load failed'))
 -- Decode failure must restore the last known format without losing selection.
+local old_decoder_cache = gfx.cache.tabled
 fail.decoder=true
 key('c');frame()
 assert(find('Sprite load failed') and find('checked 1'))
+assert(gfx.cache.tabled == old_decoder_cache,
+  'failed decode must preserve the previous sprite cache')
 fail.decoder=false
 key('c');frame()
 assert(not find('Sprite load failed'))
