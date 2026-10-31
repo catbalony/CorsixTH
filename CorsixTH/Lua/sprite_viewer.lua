@@ -94,6 +94,7 @@ local browser_cursor = 1
 local browser_results = {}
 local browser_hit_boxes = {}
 local recipe_overwrite_confirm = false
+local recipe_confirm_path, recipe_confirm_blob = nil, nil
 local screenshot_requested = false
 local help_open = false
 local help_page = 1
@@ -605,8 +606,15 @@ local function SaveRecipe()
   if not path then notice = err; MarkDirty(); return end
   local source = sprite_table_paths[sprite_table_index]
   local blob = Recipe.serialize(source[1], source[2], is_complex, assembly_mode, selected)
-  local ok, message, confirm = Recipe.save(path, blob, recipe_overwrite_confirm)
+  -- A confirmation is valid only for the exact path and bytes shown by the
+  -- previous save attempt. Changing tables, checked sprites, order or offsets
+  -- must never silently overwrite a different recipe on the next Ctrl+S.
+  local confirmed = recipe_overwrite_confirm and
+    recipe_confirm_path == path and recipe_confirm_blob == blob
+  local ok, message, confirm = Recipe.save(path, blob, confirmed)
   recipe_overwrite_confirm = confirm
+  recipe_confirm_path = confirm and path or nil
+  recipe_confirm_blob = confirm and blob or nil
   notice = (ok and (message .. ": " .. DisplayFilename(path)) or message)
   MarkDirty()
 end
