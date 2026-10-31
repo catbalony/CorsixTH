@@ -359,8 +359,94 @@ bool THAnimations::doesAnimationIncludeFrame(size_t iAnimation, size_t iFrame) {
   return false;
 }
 
+bool THAnimations::getFrameSources(size_t animation, size_t frame_ordinal,
+                                   const THLayerMask* active_mask,
+                                   std::vector<THFrameSource>& out) const {
+  if (animation >= anims.size() || frame_ordinal >= 1024) return false;
+  const size_t start = anims[animation].frame;
+  if (start >= frames.size()) return false;
+
+  // Advance along the source frame chain, rejecting malformed cycles.
+  size_t index = start;
+  std::vector<bool> visited(frames.size(), false);
+  for (size_t ordinal = 0; ordinal <= frame_ordinal; ++ordinal) {
+    if (index >= frames.size() || visited[index]) return false;
+    visited[index] = true;
+    if (ordinal != frame_ordinal) index = frames[index].next;
+  }
+  const size_t first = frames[index].list_index;
+  if (first >= elementList.size()) return false;
+
+  // Valid frame lists end at an out-of-range element index. If that
+  // terminator disappears, don't silently consume the next frame's list.
+  size_t limit = elementList.size();
+  for (const auto& frame : frames) {
+    if (frame.list_index > first && frame.list_index < limit)
+      limit = frame.list_index;
+  }
+  std::vector<THFrameSource> found;
+  bool terminated = false;
+  for (size_t i = first; i < limit; ++i) {
+    const size_t element_id = elementList[i];
+    if (element_id >= elements.size()) {
+      terminated = true;
+      break;
+    }
+    const auto& element = elements[element_id];
+    if (element.table_position % sizeof(th_sprite_t) != 0) return false;
+    const size_t sprite_id = element.table_position / sizeof(th_sprite_t);
+    if (sprite_id >= sprites.size()) return false;
+    const auto& sprite = sprites[sprite_id];
+    const uint8_t layer = element.flags >> 4;
+    found.push_back({element_id, sprite_id, element.offx, element.offy,
+                     sprite.width, sprite.height, layer, element.layerid,
+                     static_cast<uint8_t>(element.flags & 0x0F),
+                     !active_mask || active_mask->isSet(layer, element.layerid)});
+  }
+  if (!terminated) return false;
+  out.swap(found);
+  return true;
+}
+
+bool THAnimations::renderSourcePreview(size_t sprite_id, int side,
+                                       std::vector<uint8_t>& rgb, int& zoom) {
+  // The dialog uses 256. Bound callers to modest fixed-size images; there is
+  // no reason for preview generation to allocate unbounded output buffers.
+  if (side < 16 || side > 512 || !hasValidPalette()) return false;
+  Bitmap* sprite = getSpriteBitmap(sprite_id);
+  if (!sprite || !sprite->IsOk()) return false;
+  const int w = sprite->getWidth(), h = sprite->getHeight();
+  if (w <= 0 || h <= 0) return false;
+  const int new_zoom = std::max(1, std::min(8, side / std::max(w, h)));
+  const int left = (side - w * new_zoom) / 2;
+  const int top = (side - h * new_zoom) / 2;
+  std::vector<uint8_t> pixels(static_cast<size_t>(side) * side * 3);
+  for (int y = 0; y < side; ++y) {
+    for (int x = 0; x < side; ++x) {
+      const size_t pos = 3 * (static_cast<size_t>(y) * side + x);
+      const uint8_t checker = ((x / 8 + y / 8) % 2) ? 218 : 245;
+      pixels[pos] = pixels[pos + 1] = pixels[pos + 2] = checker;
+      if (x < left || y < top || x >= left + w * new_zoom ||
+          y >= top + h * new_zoom) continue;
+      const uint8_t index = sprite->pixel((x - left) / new_zoom,
+                                          (y - top) / new_zoom);
+      if (index == 0xFF) continue;
+      const th_colour_t& colour = colours[index];
+      pixels[pos] = colour.r;
+      pixels[pos + 1] = colour.g;
+      pixels[pos + 2] = colour.b;
+    }
+  }
+  rgb.swap(pixels);
+  zoom = new_zoom;
+  return true;
+}
+
 Bitmap* THAnimations::getSpriteBitmap(size_t iSprite, bool bComplex) {
   if (iSprite >= sprites.size()) return nullptr;
+  const auto& record = sprites[iSprite];
+  if (record.width == 0 || record.height == 0 ||
+      record.offset >= chunks.size()) return nullptr;
 
   if (!spriteBitmaps.at(iSprite).IsOk()) {
     wxString spriteFile =

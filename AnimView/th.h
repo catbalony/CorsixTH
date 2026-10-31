@@ -154,6 +154,16 @@ class Bitmap {
   uint8_t* m_pData;
 };
 
+// The original metadata element, with source sprite identity resolved.
+// "enabled_by_mask" is NOT pixel visibility: transparent pixels, draw flags
+// and overlapping source elements still determine the final image.
+struct THFrameSource {
+  size_t element_id{};
+  size_t sprite_id{};
+  uint8_t x{}, y{}, width{}, height{}, layer{}, layer_id{}, draw_flags{};
+  bool enabled_by_mask{};
+};
+
 class THAnimations {
  public:
   THAnimations();
@@ -204,7 +214,24 @@ class THAnimations {
   void getAnimationMask(size_t iAnimation, THLayerMask& mskLayers);
   void setSpritePath(const wxString& aPath);
 
+  // Read-only: resolve source elements of an actual animation frame, in
+  // drawing order. Reject damaged metadata rather than return associations
+  // that may have run into the following frame's element list.
+  // Failure does not modify 'out'. Does not mutate animation/frame state.
+  bool getFrameSources(size_t animation, size_t frame_ordinal,
+                       const THLayerMask* active_mask,
+                       std::vector<THFrameSource>& out) const;
+
   Bitmap* getSpriteBitmap(size_t iSprite, bool bComplex = false);
+  // The frame-source preview must not index an absent/partial palette.
+  bool hasValidPalette() const { return colours.size() == 256; }
+  // Render one original VSPR sprite onto a fixed square RGB preview.
+  // Nearest-neighbour integer zoom; source index 0xFF is transparent and
+  // shows the checkerboard. Outputs remain unchanged when this returns false.
+  // This is deliberately wxWidgets-independent so the actual preview pixels
+  // can be verified before compiling the dialog.
+  bool renderSourcePreview(size_t sprite_id, int side,
+                           std::vector<uint8_t>& rgb, int& zoom);
   th_colour_t* getPalette() { return colours.data(); }
 
   void setGhost(int iFile, int iIndex);
