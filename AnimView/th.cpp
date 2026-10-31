@@ -28,6 +28,7 @@ SOFTWARE.
 #include <wx/image.h>
 
 #include <algorithm>
+#include <memory>
 #include <array>
 #include <set>
 #include <stdexcept>
@@ -242,19 +243,46 @@ bool THAnimations::loadFrameFile(const wxString& sFilename) {
 }
 
 bool THAnimations::loadTableFile(const wxString& sFilename) {
-  spriteBitmaps.clear();
-  if (!loadVector(sprites, sFilename)) return false;
-  spriteBitmaps.resize(sprites.size());
+  std::vector<th_sprite_t> replacement;
+  if (!loadVector(replacement, sFilename)) return false;
+  // Bitmap owns raw pixel memory, so swap whole buffers; don't copy entries.
+  std::vector<Bitmap> empty_cache(replacement.size());
+  sprites.swap(replacement);
+  spriteBitmaps.swap(empty_cache);
   return true;
 }
 
+bool THAnimations::loadSpriteFile(const wxString& sFilename) {
+  std::vector<uint8_t> replacement;
+  if (!loadVector(replacement, sFilename)) return false;
+  std::vector<Bitmap> empty_cache(sprites.size());
+  chunks.swap(replacement);
+  spriteBitmaps.swap(empty_cache);
+  return true;
+}
+
+void THAnimations::swapLoadedData(THAnimations& other) noexcept {
+  anims.swap(other.anims);
+  frames.swap(other.frames);
+  elementList.swap(other.elementList);
+  elements.swap(other.elements);
+  sprites.swap(other.sprites);
+  spriteBitmaps.swap(other.spriteBitmaps);
+  chunks.swap(other.chunks);
+  colours.swap(other.colours);
+  ghostMaps.swap(other.ghostMaps);
+  // Preserve the window's selected ghost-map offset and sprite path.
+}
+
 bool THAnimations::loadPaletteFile(const wxString& sFilename) {
-  if (!loadVector(colours, sFilename)) return false;
-  for (th_colour_t& colour : colours) {
+  std::vector<th_colour_t> next;
+  if (!loadVector(next, sFilename) || next.size() != 256) return false;
+  for (th_colour_t& colour : next) {
     colour.r = palette_upscale_map[colour.r & 0x3F];
     colour.g = palette_upscale_map[colour.g & 0x3F];
     colour.b = palette_upscale_map[colour.b & 0x3F];
   }
+  colours.swap(next);
   return true;
 }
 
@@ -401,23 +429,24 @@ th_element_t* THAnimations::_getElement(uint32_t iListIndex) {
 }
 
 unsigned char* THAnimations::Decompress(unsigned char* pData, size_t& iLength) {
-  if (rnc_input_size(pData) != iLength) {
+  // The caller transfers ownership, including when the header is rejected.
+  std::unique_ptr<unsigned char[]> compressed(pData);
+  if (iLength < rnc_header_size ||
+      rnc_input_size(compressed.get()) != iLength) {
     throw std::length_error("rnc data does not match the expected length");
   }
-
-  unsigned long outlen = rnc_output_size(pData);
-  unsigned char* outbuf = new unsigned char[outlen];
-
-  if (rnc_unpack(pData, outbuf) == rnc_status::ok) {
-    delete[] pData;
-    iLength = outlen;
-    return outbuf;
-  } else {
-    delete[] pData;
-    delete[] outbuf;
+  const size_t outlen = rnc_output_size(compressed.get());
+  constexpr size_t kMaxDecodedSize = 64u * 1024u * 1024u;
+  if (outlen > kMaxDecodedSize) {
+    throw std::length_error("rnc decoded output exceeds size limit");
+  }
+  auto decoded = std::make_unique<unsigned char[]>(outlen ? outlen : 1);
+  if (rnc_unpack(compressed.get(), decoded.get()) != rnc_status::ok) {
     iLength = 0;
     return nullptr;
   }
+  iLength = outlen;
+  return decoded.release();
 }
 
 Bitmap::Bitmap() : m_iWidth(0), m_iHeight(0), m_pData(nullptr) {}

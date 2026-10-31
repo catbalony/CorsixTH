@@ -44,7 +44,11 @@ SOFTWARE.
 
 #include <array>
 #include <cstring>
+#include <exception>
+#include <memory>
+#include <type_traits>
 #include <vector>
+#include <cstdint>
 
 class wxImage;
 class wxSize;
@@ -171,13 +175,17 @@ class THAnimations {
 
   bool loadTableFile(const wxString& sFilename);
 
-  bool loadSpriteFile(const wxString& sFilename) {
-    return loadVector(chunks, sFilename);
-  }
+  // Commit a new DAT and its decoded-bitmap cache together. A failed read
+  // keeps the previously selected data and decoded pixels intact.
+  bool loadSpriteFile(const wxString& sFilename);
 
   bool loadPaletteFile(const wxString& sFilename);
 
   bool loadGhostFile(const wxString& sFilename, int iIndex);
+
+  // Commit an entirely loaded animation set after all required inputs pass.
+  // Swaps only asset content; window-specific options remain on this model.
+  void swapLoadedData(THAnimations& other) noexcept;
 
   size_t markDuplicates();
 
@@ -209,27 +217,35 @@ class THAnimations {
   static unsigned char* Decompress(unsigned char* pData, size_t& iLength);
 
  protected:
+  // Read into temporary storage first: short reads and malformed records must
+  // never leave a half-populated model or read past the file allocation.
   template <class T>
   bool loadVector(std::vector<T>& vector, const wxString& sFilename) {
-    vector.clear();
+    static_assert(std::is_trivially_copyable_v<T>, "raw record type must be trivially copyable");
+    wxFile file(sFilename);
+    if (!file.IsOpened()) return false;
 
-    wxFile oFile(sFilename);
-    if (!oFile.IsOpened()) return false;
+    size_t length = static_cast<size_t>(file.Length());
+    constexpr size_t kMaxFileSize = 64u * 1024u * 1024u;
+    if (length > kMaxFileSize) return false;
+    auto bytes = std::make_unique<unsigned char[]>(length ? length : 1);
+    if (length && file.Read(bytes.get(), length) != length) return false;
 
-    size_t iLen = static_cast<size_t>(oFile.Length());
-    unsigned char* pBuffer = new unsigned char[iLen];
-    oFile.Read(pBuffer, iLen);
-    if (memcmp(pBuffer, "RNC\001", 4) == 0) {
-      pBuffer = Decompress(pBuffer, iLen);
-      if (!pBuffer) {
+    if (length >= 4 && std::memcmp(bytes.get(), "RNC\001", 4) == 0) {
+      // RNC needs an 18-byte header. Decompress takes ownership of the input.
+      if (length < 18) return false;
+      try {
+        bytes.reset(Decompress(bytes.release(), length));
+      } catch (const std::exception&) {
         return false;
       }
+      if (!bytes) return false;
     }
+    if (length % sizeof(T) != 0) return false;
 
-    for (int offset = 0; offset < iLen; offset += sizeof(T)) {
-      vector.push_back(*(reinterpret_cast<T*>(pBuffer + offset)));
-    }
-
+    std::vector<T> loaded(length / sizeof(T));
+    if (length) std::memcpy(loaded.data(), bytes.get(), length);
+    vector.swap(loaded);
     return true;
   }
 

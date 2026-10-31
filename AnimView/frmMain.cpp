@@ -53,6 +53,7 @@ SOFTWARE.
 #include <wx/utils.h>
 
 #include <cstring>
+#include <stdexcept>
 
 #include "backdrop.h"
 
@@ -467,27 +468,38 @@ void frmMain::load() {
   sPath += wxFileName::GetPathSeparator();
   wxString aPath = _getCaseSensitivePath(L"VSPR-0", sPath);
   aPath += wxFileName::GetPathSeparator();
-  m_oAnims.setSpritePath(aPath);
-
-  if (!m_oAnims.loadAnimationFile(
+  // Build the replacement off-screen. A missing or damaged input must not
+  // overwrite the currently displayed animation model.
+  THAnimations replacement;
+  if (!replacement.loadAnimationFile(
           _getCaseSensitivePath(L"VSTART-1.ANI", sPath)) ||
-      !m_oAnims.loadFrameFile(_getCaseSensitivePath(L"VFRA-1.ANI", sPath)) ||
-      !m_oAnims.loadListFile(_getCaseSensitivePath(L"VLIST-1.ANI", sPath)) ||
-      !m_oAnims.loadElementFile(_getCaseSensitivePath(L"VELE-1.ANI", sPath)) ||
-      !m_oAnims.loadTableFile(_getCaseSensitivePath(L"VSPR-0.TAB", sPath)) ||
-      !m_oAnims.loadSpriteFile(_getCaseSensitivePath(L"VSPR-0.DAT", sPath)) ||
-      !m_oAnims.loadPaletteFile(
+      !replacement.loadFrameFile(_getCaseSensitivePath(L"VFRA-1.ANI", sPath)) ||
+      !replacement.loadListFile(_getCaseSensitivePath(L"VLIST-1.ANI", sPath)) ||
+      !replacement.loadElementFile(_getCaseSensitivePath(L"VELE-1.ANI", sPath)) ||
+      !replacement.loadTableFile(_getCaseSensitivePath(L"VSPR-0.TAB", sPath)) ||
+      !replacement.loadSpriteFile(_getCaseSensitivePath(L"VSPR-0.DAT", sPath)) ||
+      !replacement.loadPaletteFile(
           _getCaseSensitivePath(L"MPALETTE.DAT", sPath)) ||
-      !m_oAnims.loadGhostFile(
+      !replacement.loadGhostFile(
           _getCaseSensitivePath(L"../QDATA/GHOST1.DAT", sPath), 1) ||
-      !m_oAnims.loadGhostFile(
+      !replacement.loadGhostFile(
           _getCaseSensitivePath(L"../QDATA/GHOST2.DAT", sPath), 2) ||
-      !m_oAnims.loadGhostFile(
+      !replacement.loadGhostFile(
           _getCaseSensitivePath(L"../QDATA/GHOST66.DAT", sPath), 3)) {
     ::wxMessageBox(L"Cannot load one or more data files", L"Load Animations",
                    wxOK | wxICON_ERROR, this);
+    return;
   }
-  m_oAnims.markDuplicates();
+  // Validate duplicate marking before replacing the previous working set.
+  try {
+    replacement.markDuplicates();
+  } catch (const std::out_of_range&) {
+    ::wxMessageBox(L"Animation frame references are invalid", L"Load Animations",
+                   wxOK | wxICON_ERROR, this);
+    return;
+  }
+  m_oAnims.swapLoadedData(replacement);
+  m_oAnims.setSpritePath(aPath);
 
   m_txtAnimCount->SetValue(
       wxString::Format(L"%zu", m_oAnims.getAnimationCount()));

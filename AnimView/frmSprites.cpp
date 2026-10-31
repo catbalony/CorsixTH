@@ -134,15 +134,18 @@ void frmSprites::_onNext(wxCommandEvent& evt) {
 }
 
 void frmSprites::load(bool bComplex) {
-  if (!m_oAnims.loadTableFile(m_txtTable->GetValue()) ||
-      !m_oAnims.loadSpriteFile(m_txtData->GetValue().IsEmpty()
+  // Keep the current sprite gallery intact unless all three files load.
+  THAnimations replacement;
+  if (!replacement.loadTableFile(m_txtTable->GetValue()) ||
+      !replacement.loadSpriteFile(m_txtData->GetValue().IsEmpty()
                                    ? m_txtTable->GetValue().BeforeLast('.') +
                                          L".DAT"
                                    : m_txtData->GetValue()) ||
-      !m_oAnims.loadPaletteFile(m_txtPalette->GetValue())) {
+      !replacement.loadPaletteFile(m_txtPalette->GetValue())) {
     ::wxMessageBox(L"Cannot load files");
     return;
   }
+  m_oAnims.swapLoadedData(replacement);
 
   m_vSprites.clear();
   for (size_t i = 0; i < m_oAnims.getSpriteCount(); ++i) {
